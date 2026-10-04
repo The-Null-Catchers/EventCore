@@ -12,7 +12,7 @@ Webhook URLs require HTTPS/443, prohibit credentials, and do not follow redirect
 
 Topic names are constrained and topic paths are constructed only server-side. HTTP bodies are limited to 2 MiB; batches to 100 events; ordinary topic event sizes to 1 MiB; schemas to 64 KiB; partition count to 256; topics to 100 per workspace. Pull batches are bounded, as are per-member deliveries; no whole topic is held in memory. SSE uses at most 64 connections globally and 16 per workspace and five-second write deadlines. Group membership is capped at 256. Login, IP, workspace and API-key requests have fixed-window limits with bounded limiter metadata. No external schema references can access files or network destinations.
 
-The data directory requires an exclusive broker lock, private permissions and adequate available disk. Disk-pressure admission is not implemented yet: the current engine fences a partition on failed writes/fsync and readiness probes disk writes; operators must monitor capacity before exhaustion. Retention is segment-granular and cannot impose an exact active-file byte ceiling.
+The data directory requires an exclusive broker lock, private permissions and adequate available disk. The engine checks filesystem available capacity before append (default reserve 64 MiB plus one maximum record), rejects unsafe writes, fences partitions on write/fsync failure and marks readiness unavailable. Configure `BROKER_MIN_FREE_BYTES` in the API environment. Capacity checks are conservative rather than a filesystem-space reservation; other host processes can still consume space concurrently. Operators must monitor capacity before exhaustion. Retention is segment-granular and cannot impose an exact active-file byte ceiling.
 
 ## Audit and diagnostics
 

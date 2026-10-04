@@ -37,6 +37,11 @@ func run() error {
 	if err = db.Migrate(startup); err != nil {
 		return err
 	}
+	leadership, err := db.AcquireBroker(startup)
+	if err != nil {
+		return err
+	}
+	defer db.ReleaseBroker(leadership)
 	if password := os.Getenv("BOOTSTRAP_PASSWORD"); password != "" {
 		if err = db.Bootstrap(startup, env("BOOTSTRAP_WORKSPACE", "demo"), env("BOOTSTRAP_EMAIL", "owner@example.com"), password); err != nil {
 			return err
@@ -48,6 +53,13 @@ func run() error {
 		return err
 	}
 	defer broker.Close()
+	if raw := os.Getenv("BROKER_MIN_FREE_BYTES"); raw != "" {
+		floor, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || floor < 0 {
+			return errors.New("BROKER_MIN_FREE_BYTES must be nonnegative")
+		}
+		broker.MinFreeBytes = floor
+	}
 	coordinator, err := groups.New(broker, db, 30*time.Second, 30*time.Second)
 	if err != nil {
 		return err
@@ -82,6 +94,9 @@ func run() error {
 		}()
 	}
 	server := &api.Server{Webhooks: webhookWorker, WebhookAdmin: db, Broker: broker, Groups: coordinator, Auth: db, SecureCookies: secure, Ready: func(ctx context.Context) error {
+		if err := broker.Check(); err != nil {
+			return err
+		}
 		if err := db.SQL.PingContext(ctx); err != nil {
 			return err
 		}

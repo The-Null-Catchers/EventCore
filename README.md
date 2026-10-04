@@ -18,6 +18,7 @@ EventCore is intended for self-hosted event-driven services, IoT ingestion and r
 - Bounded SSE streams using disk cursors and notification channels, with connection limits and slow-client write deadlines.
 - PostgreSQL-backed bcrypt login, HttpOnly sessions, CSRF tokens, backend role checks, scoped expiring API keys, revocation and rate limits.
 - Python SDK/CLI and typed TypeScript SDK; safe GET retries, explicit mutation failures and fenced batch acknowledgments.
+- Disk-capacity admission checks, partition failure fencing and truthful readiness.
 - Prometheus-format publication/consumption/disk/uptime metrics, structured logs, health/readiness endpoints, non-root containers and automated CI.
 
 ## Architecture
@@ -98,6 +99,6 @@ Read [storage format](docs/STORAGE.md), [acceptance coverage and release gaps](d
 
 ## Before v0.1.0
 
-The dashboard, WebSocket group consumers, timestamp/range replay sessions, replay to another topic, DLQ retry/discard management, producer idempotency, richer schema lifecycle, user/password-reset/role-management flows, safe topic deletion, disk-pressure admission control, OpenTelemetry, full OpenAPI coverage, measured load scenarios and release screenshots/evidence remain open. This is not a complete production release. See the tracked gap list for acceptance work, rather than treating every prompt requirement as implemented.
+The dashboard, WebSocket group consumers, timestamp/range replay sessions, replay to another topic, DLQ retry/discard management, producer idempotency, richer schema lifecycle, user/password-reset/role-management flows, safe topic deletion, disk-pressure warning UX, OpenTelemetry, full OpenAPI coverage, measured load scenarios and release screenshots/evidence remain open. This is not a complete production release. See the tracked gap list for acceptance work, rather than treating every prompt requirement as implemented.
 
 Future clustering would require persistent broker identity, coordinated partition leadership, follower replication, leader fencing and failover. None of those is simulated here. Redis is intentionally absent because it currently has no authoritative coordination role.

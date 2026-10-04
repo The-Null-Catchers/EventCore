@@ -483,7 +483,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			event, err := s.Broker.Publish(p.Workspace, topic, in)
 			if err != nil {
-				fail(w, 400, err)
+				if errors.Is(err, storage.ErrUnavailable) {
+					s.internal(w, err)
+				} else {
+					fail(w, 400, err)
+				}
 				return
 			}
 			s.Published.Add(1)

@@ -252,3 +252,26 @@ func (d *DB) DeliveryLogs(ctx context.Context, w, id string) ([]map[string]any, 
 	}
 	return out, rows.Err()
 }
+
+// AcquireBroker holds a session advisory lock, fencing a second process sharing metadata.
+func (d *DB) AcquireBroker(ctx context.Context) (*sql.Conn, error) {
+	conn, err := d.SQL.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var acquired bool
+	if err = conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(761324099)`).Scan(&acquired); err != nil || !acquired {
+		conn.Close()
+		if err == nil {
+			err = errors.New("metadata database already has an active broker")
+		}
+		return nil, err
+	}
+	return conn, nil
+}
+func (d *DB) ReleaseBroker(conn *sql.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn.ExecContext(ctx, `SELECT pg_advisory_unlock(761324099)`)
+	conn.Close()
+}

@@ -65,7 +65,7 @@ Reset is an administrative replay operation. Stop all members, inspect retained 
 
 ## Errors and limits
 
-Errors are JSON `{"error":"diagnostic"}`. HTTP401 indicates failed authentication/CSRF, 403 denied scope, 404 unavailable resource, 409 stale consumer generation/lease, 416 a cursor outside the retained range, 429 pre-execution rate rejection, and 503 essential infrastructure failure. HTTP400 covers malformed bodies, topic/event validation and invalid operations. Some broker write failures are currently surfaced through the generic publish rejection path; improved typed infrastructure errors are a hardening item.
+Errors are JSON `{"error":"diagnostic"}`. HTTP401 indicates failed authentication/CSRF, 403 denied scope, 404 unavailable resource, 409 stale consumer generation/lease, 416 a cursor outside the retained range, 429 pre-execution rate rejection, and 503 essential infrastructure failure. HTTP400 covers malformed bodies, topic/event validation and invalid operations. Broker write/fsync and disk-pressure rejection return 503 for single publication; batch entries report their individual failures.
 
 Mutation retries are not automatically safe: a network failure can follow a successful append, commit or webhook delivery. HTTP429 rejection happens before mutation and includes Retry-After for request limits. Producers do not yet accept idempotency keys. Session tokens, API key values and webhook signing secrets must never be logged.
 

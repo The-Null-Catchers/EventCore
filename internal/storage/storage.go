@@ -31,6 +31,7 @@ const maxRecord = 2 << 20
 var nameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 var ErrRange = errors.New("offset outside retained range")
 var ErrClosed = errors.New("broker closed")
+var ErrUnavailable = errors.New("broker storage unavailable")
 
 type Input struct {
 	Type    string            `json:"type"`
@@ -84,6 +85,7 @@ type topicState struct {
 	rr     atomic.Uint64
 }
 type Broker struct {
+	MinFreeBytes int64
 	mu           sync.RWMutex
 	root         string
 	segmentBytes int64
@@ -155,7 +157,7 @@ func Open(root string, segmentBytes int64) (*Broker, error) {
 		lock.Close()
 		return nil, fmt.Errorf("data directory already locked: %w", err)
 	}
-	b := &Broker{root: root, segmentBytes: segmentBytes, topics: map[string]*topicState{}, lock: lock}
+	b := &Broker{MinFreeBytes: 64 << 20, root: root, segmentBytes: segmentBytes, topics: map[string]*topicState{}, lock: lock}
 	ok := false
 	defer func() {
 		if !ok {
@@ -309,6 +311,13 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	if err != nil {
 		return Event{}, err
 	}
+	usage, err := b.disk()
+	if err != nil {
+		return Event{}, fmt.Errorf("%w: capacity check failed", ErrUnavailable)
+	}
+	if usage.AvailableBytes < b.MinFreeBytes || usage.AvailableBytes-b.MinFreeBytes < maxRecord {
+		return Event{}, fmt.Errorf("%w: minimum free disk threshold reached", ErrUnavailable)
+	}
 	if in.Type == "" || len(in.Type) > 256 || !json.Valid(in.Data) || len(in.Key) > 4096 || len(in.Headers) > 64 {
 		return Event{}, errors.New("invalid event envelope")
 	}
@@ -338,7 +347,7 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.poisoned != nil {
-		return Event{}, p.poisoned
+		return Event{}, fmt.Errorf("%w: partition requires recovery", ErrUnavailable)
 	}
 	e := Event{ID: ID(), Topic: n, Partition: idx, Offset: p.next, Timestamp: time.Now().UTC(), Input: in}
 	payload, err := json.Marshal(e)
@@ -352,7 +361,7 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	if s.size > 0 && s.size+int64(len(payload)+8) > b.segmentBytes {
 		if err = p.rotate(); err != nil {
 			p.poisoned = err
-			return Event{}, err
+			return Event{}, fmt.Errorf("%w: segment rotation failed", ErrUnavailable)
 		}
 		s = &p.segments[len(p.segments)-1]
 	}
@@ -369,7 +378,7 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	}
 	if err != nil {
 		p.poisoned = err
-		return Event{}, fmt.Errorf("append/fsync failed; partition fenced until recovery: %w", err)
+		return Event{}, fmt.Errorf("%w: append/fsync failed; partition fenced until recovery", ErrUnavailable)
 	}
 	p.next++
 	s.next = p.next
@@ -659,4 +668,50 @@ func (b *Broker) Wait(ctx context.Context, w, n string, idx int, offset int64) e
 	case <-changed:
 		return nil
 	}
+}
+
+type DiskUsage struct {
+	TotalBytes     int64 `json:"total_bytes"`
+	AvailableBytes int64 `json:"available_bytes"`
+}
+
+func (b *Broker) disk() (DiskUsage, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(b.root, &stat); err != nil {
+		return DiskUsage{}, err
+	}
+	return DiskUsage{TotalBytes: int64(stat.Blocks) * stat.Bsize, AvailableBytes: int64(stat.Bavail) * stat.Bsize}, nil
+}
+func (b *Broker) Disk() (DiskUsage, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return DiskUsage{}, ErrClosed
+	}
+	return b.disk()
+}
+func (b *Broker) Check() error {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return ErrClosed
+	}
+	for _, t := range b.topics {
+		for _, p := range t.parts {
+			p.mu.Lock()
+			err := p.poisoned
+			p.mu.Unlock()
+			if err != nil {
+				return ErrUnavailable
+			}
+		}
+	}
+	usage, err := b.disk()
+	if err != nil {
+		return err
+	}
+	if usage.AvailableBytes < b.MinFreeBytes || usage.AvailableBytes-b.MinFreeBytes < maxRecord {
+		return ErrUnavailable
+	}
+	return nil
 }

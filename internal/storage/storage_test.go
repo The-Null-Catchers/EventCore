@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -206,5 +207,27 @@ func TestSchemaEnforcedOnRecovery(t *testing.T) {
 	}
 	if err = b.Create(Topic{Workspace: "demo", Name: "unsafe", Partitions: 1, Schema: json.RawMessage(`{"$ref":"file:///etc/passwd"}`)}); err == nil {
 		t.Fatal("external reference accepted")
+	}
+}
+func TestDiskPressureRejectsBeforeAppend(t *testing.T) {
+	b, _ := fixture(t, 1)
+	usage, err := b.Disk()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.MinFreeBytes = usage.TotalBytes + 1
+	if _, err = b.Publish("demo", "orders", input("a")); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
+	}
+	bounds, _ := b.Bounds("demo", "orders", 0)
+	if bounds.Next != 0 {
+		t.Fatal("disk pressure accepted an append")
+	}
+	if err = b.Check(); err == nil {
+		t.Fatal("disk pressure reported ready")
+	}
+	b.MinFreeBytes = 0
+	if _, err = b.Publish("demo", "orders", input("a")); err != nil {
+		t.Fatal(err)
 	}
 }

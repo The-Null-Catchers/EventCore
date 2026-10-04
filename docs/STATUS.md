@@ -33,7 +33,7 @@ The local environment does not provide Docker or PostgreSQL. Local unit/integrat
 6. Add webhook custom-header support, per-attempt historical rows (currently the latest state per event), real external endpoint testing, and terminal 4xx classification. Current retries remain bounded.
 7. Add topic update/delete with confirmation and auditing, schema version/lifecycle management and collision rules for user-created `.DLQ` names.
 8. Add user provisioning, role administration, workspace management and password-reset token/email flow. Membership isolation currently works, but owner provisioning is bootstrap-only.
-9. Add disk-pressure write admission, broker version/git SHA/system diagnostics, OpenTelemetry, consumer-lag and delivery Prometheus metrics, and a Prometheus/Grafana deployment profile.
+9. Add disk-pressure warning states, broker version/git SHA/system diagnostics, OpenTelemetry, consumer-lag and delivery Prometheus metrics, and a Prometheus/Grafana deployment profile.
 10. Add full OpenAPI, measured sustained/burst/slow-consumer load tests, storage growth results, SDK package/release automation, dependency scanning for Go and container images, and reproducible image digest pins.
 11. Run the complete requested 16-step workflow, including a real configured HTTP-500 endpoint and dashboard accuracy checks, then publish release notes/screenshots and tag v0.1.0.
 
