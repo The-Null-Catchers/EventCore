@@ -1,0 +1,77 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: eventcore
+          POSTGRES_PASSWORD: ci-test-only
+          POSTGRES_DB: eventcore
+        ports: ['5432:5432']
+        options: --health-cmd 'pg_isready -U eventcore' --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://eventcore:ci-test-only@localhost:5432/eventcore?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Format, vet and race tests including PostgreSQL
+        run: |
+          test -z "$(gofmt -l apps internal)"
+          go vet ./...
+          go test -race -count=1 ./...
+  sdks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --prefix packages/sdk-js --ignore-scripts
+      - run: npm test --prefix packages/sdk-js
+      - run: PYTHONPATH=packages/sdk-python python -m unittest discover -s packages/sdk-python/tests -v
+      - run: npm audit --prefix packages/sdk-js --audit-level=high
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Generate ephemeral test configuration
+        run: |
+          python - <<'PY'
+          import secrets, base64
+          with open('.env','w') as f:
+            f.write('POSTGRES_PASSWORD='+secrets.token_hex(24)+'\n')
+            f.write('BOOTSTRAP_PASSWORD='+secrets.token_hex(24)+'\n')
+            f.write('BOOTSTRAP_EMAIL=owner@example.com\nCOOKIE_SECURE=false\n')
+            f.write('WEBHOOK_ENCRYPTION_KEY='+base64.b64encode(secrets.token_bytes(32)).decode()+'\n')
+          PY
+      - run: docker compose up --build -d --wait --wait-timeout 180
+      - name: Publish, consume and rebalance through Python SDK
+        run: |
+          set -a
+          source .env
+          set +a
+          PYTHONPATH=packages/sdk-python python scripts/acceptance.py before
+      - name: Restart the broker with persistent volumes
+        run: docker compose restart api && docker compose up -d --wait --wait-timeout 90
+      - name: Verify recovery and replay
+        run: PYTHONPATH=packages/sdk-python python scripts/acceptance.py after
+      - if: failure()
+        run: docker compose logs --no-color --tail=100 api postgres
+      - if: always()
+        run: docker compose down -v

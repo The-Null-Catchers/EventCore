@@ -1,0 +1,7 @@
+.git
+.env
+data
+**/node_modules
+**/dist
+**/__pycache__
+.acceptance.json
