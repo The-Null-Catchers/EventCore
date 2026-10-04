@@ -7,6 +7,7 @@ import (
 	"github.com/The-Null-Catchers/EventCore/internal/groups"
 	"github.com/The-Null-Catchers/EventCore/internal/metadata"
 	"github.com/The-Null-Catchers/EventCore/internal/storage"
+	"github.com/The-Null-Catchers/EventCore/internal/webhooks"
 	"log/slog"
 	"net/http"
 	"os"
@@ -55,7 +56,32 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &api.Server{Broker: broker, Groups: coordinator, Auth: db, SecureCookies: secure, Ready: func(ctx context.Context) error {
+	var webhookWorker *webhooks.Worker
+	if raw := os.Getenv("WEBHOOK_ENCRYPTION_KEY"); raw != "" {
+		key, err := webhooks.ParseKey(raw)
+		if err != nil {
+			return err
+		}
+		webhookWorker = &webhooks.Worker{Broker: broker, Groups: coordinator, Store: db, Key: key}
+		workerDone := make(chan struct{})
+		defer func() { cancel(); <-workerDone }()
+		go func() {
+			defer close(workerDone)
+			tick := time.NewTicker(time.Second)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					if err := webhookWorker.Tick(ctx); err != nil {
+						slog.Error("webhook worker failed", "error", err)
+					}
+				}
+			}
+		}()
+	}
+	server := &api.Server{Webhooks: webhookWorker, WebhookAdmin: db, Broker: broker, Groups: coordinator, Auth: db, SecureCookies: secure, Ready: func(ctx context.Context) error {
 		if err := db.SQL.PingContext(ctx); err != nil {
 			return err
 		}
@@ -97,6 +123,19 @@ func run() error {
 	}
 }
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
+		client := http.Client{Timeout: 2 * time.Second}
+		resp, err := client.Get("http://127.0.0.1:8080/ready")
+		if err != nil {
+			os.Exit(1)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		slog.Error("startup or serving failed", "error", err)
 		os.Exit(1)

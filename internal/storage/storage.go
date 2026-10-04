@@ -2,12 +2,15 @@
 package storage
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"hash/crc32"
 	"hash/fnv"
 	"io"
@@ -44,14 +47,15 @@ type Event struct {
 	Input
 }
 type Topic struct {
-	Workspace        string    `json:"workspace"`
-	Name             string    `json:"name"`
-	Description      string    `json:"description,omitempty"`
-	Partitions       int       `json:"partitions"`
-	MaxEventBytes    int       `json:"max_event_bytes"`
-	RetentionBytes   int64     `json:"retention_bytes"`
-	RetentionSeconds int64     `json:"retention_seconds"`
-	CreatedAt        time.Time `json:"created_at"`
+	Schema           json.RawMessage `json:"schema,omitempty"`
+	Workspace        string          `json:"workspace"`
+	Name             string          `json:"name"`
+	Description      string          `json:"description,omitempty"`
+	Partitions       int             `json:"partitions"`
+	MaxEventBytes    int             `json:"max_event_bytes"`
+	RetentionBytes   int64           `json:"retention_bytes"`
+	RetentionSeconds int64           `json:"retention_seconds"`
+	CreatedAt        time.Time       `json:"created_at"`
 }
 type Bounds struct {
 	Oldest   int64 `json:"oldest_offset"`
@@ -71,8 +75,10 @@ type partition struct {
 	file     *os.File
 	next     int64
 	poisoned error
+	changed  chan struct{}
 }
 type topicState struct {
+	schema *jsonschema.Schema
 	config Topic
 	parts  []*partition
 	rr     atomic.Uint64
@@ -169,7 +175,7 @@ func Open(root string, segmentBytes int64) (*Broker, error) {
 		if e = json.Unmarshal(raw, &c); e != nil {
 			return nil, e
 		}
-		if !ValidName(c.Workspace) || !ValidName(c.Name) || c.Partitions < 1 || c.Partitions > 256 || c.MaxEventBytes < 1 || c.MaxEventBytes > 1<<20 || path != filepath.Join(root, "topics", c.Workspace, c.Name, "topic.json") {
+		if !ValidName(c.Workspace) || !ValidName(c.Name) || c.Partitions < 1 || c.Partitions > 256 || c.MaxEventBytes < 1 || c.MaxEventBytes > maxRecord-4096 || path != filepath.Join(root, "topics", c.Workspace, c.Name, "topic.json") {
 			return nil, fmt.Errorf("invalid topic manifest %s", path)
 		}
 		t, e := b.openTopic(c)
@@ -183,6 +189,26 @@ func Open(root string, segmentBytes int64) (*Broker, error) {
 }
 func (b *Broker) openTopic(c Topic) (*topicState, error) {
 	t := &topicState{config: c}
+	if len(c.Schema) > 0 {
+		if len(c.Schema) > 64<<10 {
+			return nil, errors.New("schema maximum 64 KiB")
+		}
+		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(c.Schema))
+		if err != nil {
+			return nil, err
+		}
+		compiler := jsonschema.NewCompiler()
+		compiler.DefaultDraft(jsonschema.Draft2020)
+		compiler.UseLoader(denyLoader{})
+		if err = compiler.AddResource("https://eventcore.invalid/schema", doc); err != nil {
+			return nil, err
+		}
+		t.schema, err = compiler.Compile("https://eventcore.invalid/schema")
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	for i := 0; i < c.Partitions; i++ {
 		p, err := openPartition(filepath.Join(b.root, "topics", c.Workspace, c.Name, strconv.Itoa(i)))
 		if err != nil {
@@ -210,7 +236,7 @@ func (b *Broker) Create(c Topic) error {
 	if c.MaxEventBytes == 0 {
 		c.MaxEventBytes = 1 << 20
 	}
-	if c.MaxEventBytes < 1 || c.MaxEventBytes > 1<<20 || c.RetentionBytes < 0 || c.RetentionSeconds < 0 {
+	if c.MaxEventBytes < 1 || c.MaxEventBytes > maxRecord-4096 || c.RetentionBytes < 0 || c.RetentionSeconds < 0 {
 		return errors.New("invalid topic limits")
 	}
 	c.CreatedAt = time.Now().UTC()
@@ -286,6 +312,15 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	if in.Type == "" || len(in.Type) > 256 || !json.Valid(in.Data) || len(in.Key) > 4096 || len(in.Headers) > 64 {
 		return Event{}, errors.New("invalid event envelope")
 	}
+	if t.schema != nil {
+		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(in.Data))
+		if err != nil {
+			return Event{}, err
+		}
+		if err = t.schema.Validate(doc); err != nil {
+			return Event{}, fmt.Errorf("schema validation: %w", err)
+		}
+	}
 	raw, err := json.Marshal(in)
 	if err != nil {
 		return Event{}, err
@@ -340,6 +375,8 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	s.next = p.next
 	s.size += int64(len(record))
 	s.last = e.Timestamp
+	close(p.changed)
+	p.changed = make(chan struct{})
 	return e, nil
 }
 func openPartition(dir string) (*partition, error) {
@@ -351,7 +388,7 @@ func openPartition(dir string) (*partition, error) {
 		return nil, err
 	}
 	sort.Strings(paths)
-	p := &partition{}
+	p := &partition{changed: make(chan struct{})}
 	if len(paths) == 0 {
 		p.segments = []segment{{path: filepath.Join(dir, fmt.Sprintf("%020d.log", 0))}}
 		if err = p.openActive(); err != nil {
@@ -571,6 +608,7 @@ func (b *Broker) Close() error {
 	var errs []error
 	for _, t := range b.topics {
 		for _, p := range t.parts {
+			close(p.changed)
 			if p.file != nil {
 				errs = append(errs, p.file.Close())
 			}
@@ -580,4 +618,45 @@ func (b *Broker) Close() error {
 		errs = append(errs, syscall.Flock(int(b.lock.Fd()), syscall.LOCK_UN), b.lock.Close())
 	}
 	return errors.Join(errs...)
+}
+
+type denyLoader struct{}
+
+func (denyLoader) Load(string) (any, error) {
+	return nil, errors.New("external schema references are prohibited")
+}
+
+// Wait uses bounded notification channels; events remain on disk, never in fanout buffers.
+func (b *Broker) Wait(ctx context.Context, w, n string, idx int, offset int64) error {
+	b.mu.RLock()
+	t, err := b.topic(w, n)
+	if err != nil {
+		b.mu.RUnlock()
+		return err
+	}
+	if idx < 0 || idx >= len(t.parts) {
+		b.mu.RUnlock()
+		return errors.New("invalid partition")
+	}
+	p := t.parts[idx]
+	p.mu.Lock()
+	if offset < p.segments[0].base || offset > p.next {
+		p.mu.Unlock()
+		b.mu.RUnlock()
+		return ErrRange
+	}
+	if p.next > offset {
+		p.mu.Unlock()
+		b.mu.RUnlock()
+		return nil
+	}
+	changed := p.changed
+	p.mu.Unlock()
+	b.mu.RUnlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-changed:
+		return nil
+	}
 }

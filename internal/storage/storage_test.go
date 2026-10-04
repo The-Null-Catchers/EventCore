@@ -184,3 +184,27 @@ func BenchmarkPublishDurable(b *testing.B) {
 		}
 	}
 }
+func TestSchemaEnforcedOnRecovery(t *testing.T) {
+	b, dir := fixture(t, 1)
+	if err := b.Create(Topic{Workspace: "demo", Name: "strict", Partitions: 1, Schema: json.RawMessage(`{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Publish("demo", "strict", input("")); err == nil {
+		t.Fatal("schema bypassed")
+	}
+	if _, err := b.Publish("demo", "strict", Input{Type: "order", Data: json.RawMessage(`{"id":"123"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	b.Close()
+	b, err := Open(dir, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if _, err = b.Publish("demo", "strict", input("")); err == nil {
+		t.Fatal("schema lost on restart")
+	}
+	if err = b.Create(Topic{Workspace: "demo", Name: "unsafe", Partitions: 1, Schema: json.RawMessage(`{"$ref":"file:///etc/passwd"}`)}); err == nil {
+		t.Fatal("external reference accepted")
+	}
+}

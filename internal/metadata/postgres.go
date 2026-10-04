@@ -9,6 +9,7 @@ import (
 	"errors"
 	"github.com/The-Null-Catchers/EventCore/internal/groups"
 	"github.com/The-Null-Catchers/EventCore/internal/storage"
+	"github.com/The-Null-Catchers/EventCore/internal/webhooks"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"golang.org/x/crypto/bcrypt"
 	"time"
@@ -55,6 +56,8 @@ CREATE TABLE IF NOT EXISTS memberships(user_id text REFERENCES users(id),workspa
 CREATE TABLE IF NOT EXISTS sessions(token_hash text PRIMARY KEY,user_id text REFERENCES users(id),workspace_id text REFERENCES workspaces(id),csrf text NOT NULL,expires_at timestamptz NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys(id text PRIMARY KEY,workspace_id text REFERENCES workspaces(id),token_hash text UNIQUE NOT NULL,name text NOT NULL,scopes jsonb NOT NULL,expires_at timestamptz NOT NULL,revoked bool NOT NULL DEFAULT false,last_used_at timestamptz);
 CREATE TABLE IF NOT EXISTS consumer_groups(workspace_id text REFERENCES workspaces(id),topic text NOT NULL,name text NOT NULL,state jsonb NOT NULL,PRIMARY KEY(workspace_id,topic,name));
+CREATE TABLE IF NOT EXISTS webhooks(id text PRIMARY KEY,workspace_id text REFERENCES workspaces(id),topic text NOT NULL,url text NOT NULL,encrypted_secret text NOT NULL,max_attempts int NOT NULL,delay_seconds int NOT NULL,paused bool NOT NULL DEFAULT false);
+CREATE TABLE IF NOT EXISTS webhook_attempts(subscription_id text REFERENCES webhooks(id),event_id text NOT NULL,attempt jsonb NOT NULL,PRIMARY KEY(subscription_id,event_id));
 CREATE TABLE IF NOT EXISTS audit(id bigserial PRIMARY KEY,workspace_id text NOT NULL,actor text NOT NULL,action text NOT NULL,resource text NOT NULL,ip text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
 `)
 	if err != nil {
@@ -174,4 +177,78 @@ func (d *DB) RevokeKey(ctx context.Context, w, id string) error {
 func (d *DB) Audit(ctx context.Context, p Principal, action, resource, ip string) error {
 	_, err := d.SQL.ExecContext(ctx, `INSERT INTO audit(workspace_id,actor,action,resource,ip) VALUES($1,$2,$3,$4,$5)`, p.Workspace, p.ID, action, resource, ip)
 	return err
+}
+
+func (d *DB) Subscriptions(ctx context.Context) ([]webhooks.Subscription, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT id,workspace_id,topic,url,encrypted_secret,max_attempts,delay_seconds,paused FROM webhooks ORDER BY id LIMIT 1000`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []webhooks.Subscription{}
+	for rows.Next() {
+		var s webhooks.Subscription
+		if err = rows.Scan(&s.ID, &s.Workspace, &s.Topic, &s.URL, &s.EncryptedSecret, &s.MaxAttempts, &s.DelaySeconds, &s.Paused); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+func (d *DB) Create(ctx context.Context, s webhooks.Subscription) error {
+	_, err := d.SQL.ExecContext(ctx, `INSERT INTO webhooks VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, s.ID, s.Workspace, s.Topic, s.URL, s.EncryptedSecret, s.MaxAttempts, s.DelaySeconds, s.Paused)
+	return err
+}
+func (d *DB) Attempt(ctx context.Context, subscription, event string) (webhooks.Attempt, error) {
+	var a webhooks.Attempt
+	var raw []byte
+	err := d.SQL.QueryRowContext(ctx, `SELECT attempt FROM webhook_attempts WHERE subscription_id=$1 AND event_id=$2`, subscription, event).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return a, nil
+	}
+	if err != nil {
+		return a, err
+	}
+	err = json.Unmarshal(raw, &a)
+	return a, err
+}
+func (d *DB) SaveAttempt(ctx context.Context, subscription, event string, a webhooks.Attempt) error {
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	_, err = d.SQL.ExecContext(ctx, `INSERT INTO webhook_attempts VALUES($1,$2,$3) ON CONFLICT(subscription_id,event_id) DO UPDATE SET attempt=EXCLUDED.attempt`, subscription, event, raw)
+	return err
+}
+func (d *DB) Pause(ctx context.Context, w, id string, paused bool) error {
+	result, err := d.SQL.ExecContext(ctx, `UPDATE webhooks SET paused=$3 WHERE workspace_id=$1 AND id=$2`, w, id, paused)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return errors.New("webhook not found")
+	}
+	return nil
+}
+func (d *DB) DeliveryLogs(ctx context.Context, w, id string) ([]map[string]any, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT a.event_id,a.attempt FROM webhook_attempts a JOIN webhooks h ON h.id=a.subscription_id WHERE h.workspace_id=$1 AND h.id=$2 ORDER BY a.event_id LIMIT 100`, w, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var event string
+		var raw []byte
+		if err = rows.Scan(&event, &raw); err != nil {
+			return nil, err
+		}
+		var a webhooks.Attempt
+		if err = json.Unmarshal(raw, &a); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"event_id": event, "attempt": a})
+	}
+	return out, rows.Err()
 }

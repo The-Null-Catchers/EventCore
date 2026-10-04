@@ -9,6 +9,7 @@ import (
 	"github.com/The-Null-Catchers/EventCore/internal/groups"
 	"github.com/The-Null-Catchers/EventCore/internal/metadata"
 	"github.com/The-Null-Catchers/EventCore/internal/storage"
+	"github.com/The-Null-Catchers/EventCore/internal/webhooks"
 	"io"
 	"log/slog"
 	"net"
@@ -28,11 +29,19 @@ type Auth interface {
 	RevokeKey(context.Context, string, string) error
 	Audit(context.Context, metadata.Principal, string, string, string) error
 }
+type WebhookAdmin interface {
+	Pause(context.Context, string, string, bool) error
+	DeliveryLogs(context.Context, string, string) ([]map[string]any, error)
+}
 type bucket struct {
 	start time.Time
 	count int
 }
 type Server struct {
+	streams      map[string]int
+	Webhooks     *webhooks.Worker
+	WebhookAdmin WebhookAdmin
+
 	Broker              *storage.Broker
 	Groups              *groups.Coordinator
 	Auth                Auth
@@ -280,6 +289,79 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]bool{"ok": true})
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/v1/webhooks") {
+		if !Allowed(p, "*", "admin") {
+			fail(w, 403, errors.New("admin required"))
+			return
+		}
+		if s.Webhooks == nil {
+			fail(w, 503, errors.New("webhooks not configured"))
+			return
+		}
+		segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(segments) == 2 && r.Method == "GET" {
+			subs, err := s.Webhooks.Store.Subscriptions(r.Context())
+			if err != nil {
+				s.internal(w, err)
+				return
+			}
+			out := []webhooks.Subscription{}
+			for _, sub := range subs {
+				if sub.Workspace == p.Workspace {
+					sub.Secret = ""
+					out = append(out, sub)
+				}
+			}
+			reply(w, 200, out)
+			return
+		}
+		if len(segments) == 2 && r.Method == "POST" {
+			var sub webhooks.Subscription
+			if err := body(w, r, &sub); err != nil {
+				fail(w, 400, err)
+				return
+			}
+			sub.Workspace = p.Workspace
+			if !s.audit(w, r, p, "webhook.create", sub.Topic) {
+				return
+			}
+			if err := s.Webhooks.Initialize(r.Context(), sub); err != nil {
+				fail(w, 400, err)
+				return
+			}
+			reply(w, 201, map[string]bool{"ok": true})
+			return
+		}
+		if len(segments) == 3 && r.Method == "PATCH" {
+			var req struct {
+				Paused bool `json:"paused"`
+			}
+			if err := body(w, r, &req); err != nil {
+				fail(w, 400, err)
+				return
+			}
+			if !s.audit(w, r, p, "webhook.pause", segments[2]) {
+				return
+			}
+			if err := s.WebhookAdmin.Pause(r.Context(), p.Workspace, segments[2], req.Paused); err != nil {
+				fail(w, 400, err)
+				return
+			}
+			reply(w, 200, map[string]bool{"ok": true})
+			return
+		}
+		if len(segments) == 4 && segments[3] == "attempts" && r.Method == "GET" {
+			logs, err := s.WebhookAdmin.DeliveryLogs(r.Context(), p.Workspace, segments[2])
+			if err != nil {
+				s.internal(w, err)
+				return
+			}
+			reply(w, 200, logs)
+			return
+		}
+		fail(w, 404, errors.New("webhook route not found"))
+		return
+	}
 	if r.URL.Path == "/v1/topics" {
 		if r.Method == "GET" {
 			topics := []storage.Topic{}
@@ -302,6 +384,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			req.Workspace = p.Workspace
+			if strings.HasSuffix(req.Name, ".DLQ") {
+				fail(w, 400, errors.New(".DLQ suffix is reserved"))
+				return
+			}
+			if req.MaxEventBytes > 1<<20 {
+				fail(w, 400, errors.New("topic event maximum is 1 MiB"))
+				return
+			}
 			if len(s.Broker.Topics(p.Workspace)) >= 100 {
 				fail(w, 409, errors.New("topic limit"))
 				return
@@ -353,6 +443,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			bounds = append(bounds, v)
 		}
 		reply(w, 200, map[string]any{"topic": cfg, "partitions": bounds})
+		return
+	}
+	if len(parts) == 4 && parts[3] == "stream" && r.Method == "GET" {
+		s.stream(w, r, p, topic)
 		return
 	}
 	if len(parts) == 5 && parts[3] == "events" && parts[4] == "batch" && r.Method == "POST" {
@@ -555,4 +649,101 @@ func (s *Server) group(w http.ResponseWriter, r *http.Request, p metadata.Princi
 		return
 	}
 	reply(w, 200, result)
+}
+
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, p metadata.Principal, topic string) {
+	partition, err := strconv.Atoi(r.URL.Query().Get("partition"))
+	if err != nil {
+		fail(w, 400, errors.New("partition required"))
+		return
+	}
+	bounds, err := s.Broker.Bounds(p.Workspace, topic, partition)
+	if err != nil {
+		fail(w, 404, err)
+		return
+	}
+	offset := bounds.Next
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		offset, err = strconv.ParseInt(raw, 10, 64)
+	}
+	if last := r.Header.Get("Last-Event-ID"); last != "" {
+		offset, err = strconv.ParseInt(last, 10, 64)
+		if err == nil && offset < 1<<63-1 {
+			offset++
+		} else {
+			err = errors.New("invalid Last-Event-ID")
+		}
+	}
+	if err != nil || offset < bounds.Oldest || offset > bounds.Next {
+		fail(w, 416, storage.ErrRange)
+		return
+	}
+	s.mu.Lock()
+	if s.streams == nil {
+		s.streams = map[string]int{}
+	}
+	total := 0
+	for _, v := range s.streams {
+		total += v
+	}
+	if total >= 64 || s.streams[p.Workspace] >= 16 {
+		s.mu.Unlock()
+		fail(w, 429, errors.New("stream connection limit"))
+		return
+	}
+	s.streams[p.Workspace]++
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); s.streams[p.Workspace]--; s.mu.Unlock() }()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Accel-Buffering", "no")
+	controller := http.NewResponseController(w)
+	send := func(text string) error {
+		if err := controller.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, text); err != nil {
+			return err
+		}
+		return controller.Flush()
+	}
+	if err = send(": connected\n\n"); err != nil {
+		return
+	}
+	for {
+		events, err := s.Broker.Read(p.Workspace, topic, partition, offset, 100)
+		if err != nil {
+			send("event: error\ndata: {\"error\":\"retained range unavailable\"}\n\n")
+			return
+		}
+		for _, event := range events {
+			offset = event.Offset + 1
+			if kind := r.URL.Query().Get("type"); kind != "" && kind != event.Type {
+				continue
+			}
+			raw, err := json.Marshal(event)
+			if err != nil {
+				return
+			}
+			if err = send(fmt.Sprintf("id: %d\ndata: %s\n\n", event.Offset, raw)); err != nil {
+				return
+			}
+		}
+		if len(events) > 0 {
+			continue
+		}
+		waitCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		err = s.Broker.Wait(waitCtx, p.Workspace, topic, partition, offset)
+		cancel()
+		if r.Context().Err() != nil {
+			return
+		}
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			if err = send(": heartbeat\n\n"); err != nil {
+				return
+			}
+		}
+	}
 }
