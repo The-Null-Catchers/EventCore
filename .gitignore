@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 coverage.out
 bin/
+packages/sdk-js/dist/
+*.egg-info/
+.acceptance.json
