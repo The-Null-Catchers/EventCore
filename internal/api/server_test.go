@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"github.com/The-Null-Catchers/EventCore/internal/storage"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -144,4 +146,44 @@ func TestReadinessDoesNotHideDBFailure(t *testing.T) {
 	if w.Code != 503 {
 		t.Fatal(w.Code)
 	}
+}
+
+func TestSSEReceivesRealAppendedEvent(t *testing.T) {
+	h, b := apiFixture(t)
+	server := httptest.NewServer(h)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", server.URL+"/v1/topics/orders/stream?partition=0&offset=0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer admin")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatal(resp.Status)
+	}
+	published, err := b.Publish("demo", "orders", storage.Input{Type: "live.order", Data: json.RawMessage(`{"id":"123"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			var received storage.Event
+			if err = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &received); err != nil {
+				t.Fatal(err)
+			}
+			if received.ID != published.ID || received.Offset != 0 {
+				t.Fatal(received)
+			}
+			return
+		}
+	}
+	t.Fatal("SSE did not emit durable event", scanner.Err())
 }

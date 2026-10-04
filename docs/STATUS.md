@@ -23,6 +23,10 @@ The upstream repository was empty on initial inspection. No existing architectur
 
 The local environment does not provide Docker or PostgreSQL. Local unit/integration tests use real disk logs and injected auth/metadata/HTTP dependencies where named above. CI status is the source of truth for external database/container evidence; a workflow file alone is not a passing result.
 
+## Verified external run
+
+[CI run 37240421722](https://github.com/The-Null-Catchers/EventCore/actions/runs/37240421722) passed all three jobs on 2026-10-04 UTC at commit `9058364`: backend race/vet tests against PostgreSQL, JS/Python SDK tests and dependency audit, and Docker Compose acceptance with 10,000 initial events plus restart/reset/replay of 10,001. The earlier service-health quoting failure was fixed before this passing run. Subsequent hardening commits must pass their own CI before these results can be attributed to their exact SHA.
+
 ## Required before tagging v0.1.0
 
 1. Complete and test a professional dashboard against these real APIs. No dashboard screenshots exist yet.

@@ -24,6 +24,21 @@ func TestPostgresIntegration(t *testing.T) {
 	if err = db.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	leadership, err := db.AcquireBroker(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := db.AcquireBroker(ctx); err == nil {
+		db.ReleaseBroker(second)
+		db.ReleaseBroker(leadership)
+		t.Fatal("second broker acquired metadata")
+	}
+	db.ReleaseBroker(leadership)
+	leadership, err = db.AcquireBroker(ctx)
+	if err != nil {
+		t.Fatal("metadata lock not released", err)
+	}
+	db.ReleaseBroker(leadership)
 	w := "test-" + storage.ID()
 	email := w + "@example.com"
 	if err = db.Bootstrap(ctx, w, email, "a-long-test-password-1234"); err != nil {

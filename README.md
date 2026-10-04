@@ -37,7 +37,7 @@ flowchart TD
   Log --> SSE["Bounded SSE cursors"]
 ```
 
-The broker, coordinator and delivery worker share one process intentionally. There is one authoritative broker, no replication and no failover. Do not start a second API instance against the same database/data set. The disk lock only protects processes sharing the same directory; it is not cluster leadership.
+The broker, coordinator and delivery worker share one process intentionally. There is one authoritative broker, no replication and no failover. Do not start a second API instance against the same database/data set. The disk lock protects processes sharing the same directory, and a PostgreSQL session advisory lock rejects a second process sharing metadata. These are single-process startup guards, not replicated cluster leadership.
 
 ## Run locally
 
