@@ -7,6 +7,7 @@ The upstream repository was empty on initial inspection. No existing architectur
 | Scenario | Evidence |
 |---|---|
 | Segments rotate and recover sequential offsets | Go storage restart test |
+| Acknowledged append survives SIGKILL without graceful Close | Subprocess crash/recovery test |
 | Concurrent producers preserve contiguous offsets | 20 producers, 1,000 events, race detector |
 | Torn tail repaired; complete checksum corruption rejected | Storage corruption tests |
 | Retention preserves offsets across restart | Storage retention test |

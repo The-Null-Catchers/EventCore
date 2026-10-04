@@ -713,7 +713,15 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, p metadata.Princ
 	if err = send(": connected\n\n"); err != nil {
 		return
 	}
+	lastAuthentication := time.Now()
 	for {
+		if time.Since(lastAuthentication) >= 30*time.Second {
+			updated, err := s.principal(r)
+			if err != nil || updated.Workspace != p.Workspace || !Allowed(updated, topic, "read") {
+				return
+			}
+			lastAuthentication = time.Now()
+		}
 		events, err := s.Broker.Read(p.Workspace, topic, partition, offset, 100)
 		if err != nil {
 			send("event: error\ndata: {\"error\":\"retained range unavailable\"}\n\n")

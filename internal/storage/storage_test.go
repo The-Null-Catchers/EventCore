@@ -1,10 +1,13 @@
 package storage
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -229,5 +232,58 @@ func TestDiskPressureRejectsBeforeAppend(t *testing.T) {
 	b.MinFreeBytes = 0
 	if _, err = b.Publish("demo", "orders", input("a")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCrashRecoverySubprocess(t *testing.T) {
+	if dir := os.Getenv("EVENTCORE_CRASH_TEST_DIR"); dir != "" {
+		b, err := Open(dir, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = b.Create(Topic{Workspace: "demo", Name: "orders", Partitions: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = b.Publish("demo", "orders", input("same")); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Println("DURABLE")
+		for {
+			time.Sleep(time.Second)
+		}
+	}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCrashRecoverySubprocess$")
+	cmd.Env = append(os.Environ(), "EVENTCORE_CRASH_TEST_DIR="+dir)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	scanner := bufio.NewScanner(stdout)
+	if !scanner.Scan() || scanner.Text() != "DURABLE" {
+		t.Fatal("child never acknowledged durable event", scanner.Err())
+	}
+	if err = cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Wait()
+	broker, err := Open(dir, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Close()
+	events, err := broker.Read("demo", "orders", 0, 0, 10)
+	if err != nil || len(events) != 1 || events[0].Offset != 0 {
+		t.Fatal(events, err)
+	}
+	next, err := broker.Publish("demo", "orders", input("same"))
+	if err != nil || next.Offset != 1 {
+		t.Fatal(next, err)
 	}
 }
