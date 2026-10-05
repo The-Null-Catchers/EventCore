@@ -11,7 +11,7 @@ EventCore is intended for self-hosted event-driven services, IoT ingestion and r
 - Ordered per-partition offsets, length-prefixed CRC32 records, segment rotation and fsync-before-ack.
 - Exclusive process lock on the data directory, restart recovery, repair of an incomplete active tail and refusal of complete-record corruption.
 - Single and bounded, non-atomic batch publication; optional JSON Schema 2020-12 validation on event `data`. External schema references are prohibited.
-- Fenced consumer groups, deterministic partition assignment, membership expiry, batch acknowledgments, nack/redelivery, visibility leases and durable next-offset commits.
+- Fenced consumer groups, deterministic partition assignment, membership expiry, batch acknowledgments, explicit processed-prefix commits, nack/redelivery, visibility leases and durable next-offset commits.
 - Safe group resets when no members are active; replay by resetting offsets or reading immutable retained ranges.
 - Time/size retention of sealed segments and explicit HTTP 416 for offsets that have been removed.
 - HTTPS webhooks with HMAC timestamp signatures, encrypted secrets, persistent attempt state, bounded exponential retry, delivery logs, pause/resume and durable DLQ routing.
@@ -77,7 +77,7 @@ Use an admin key to create topics and groups; give application producers only `t
 
 Durable acknowledgment means the append completed and `fsync` returned successfully on the configured filesystem. Actual power-loss durability depends on the filesystem, host and disk honoring synchronization. Publication failures after a write may be ambiguous; producer idempotency is not implemented and the SDKs never retry publication automatically.
 
-Group offsets mean **the next event to process**. `next_offset=100` and `committed=70` gives `lag=30`. A batch ack commits all events in that partition batch, so applications must finish the entire batch first. A nack or expired visibility lease causes redelivery. Ownership changes invalidate outstanding tokens and generations; clients must rejoin on HTTP 409. Processed side effects may repeat during crashes or rebalances. Applications should use event IDs for sink deduplication.
+Group offsets mean **the next event to process**. `next_offset=100` and `committed=70` gives `lag=30`. A batch ack commits all events in that partition batch, so applications must finish the entire batch first. For partial processing, call the delivery’s `commit(next_offset)` (Python) or `commit(nextOffset)` (JS). This saves only the processed prefix, releases the lease and redelivers the suffix with a new token on the next pull. A nack or expired visibility lease causes redelivery. Ownership changes invalidate outstanding tokens and generations; clients must rejoin on HTTP 409. Processed side effects may repeat during crashes or rebalances. Applications should use event IDs for sink deduplication.
 
 Webhook attempts are persisted before the network operation. A successful HTTP delivery is recorded before acknowledging the source event; terminal failure is appended durably to `<topic>.DLQ` before acknowledging. A crash between external delivery/DLQ append and the metadata update can produce duplicates. **At-least-once; never exactly-once.** SSE is a cursor-based observation transport and does not commit consumer-group offsets. Resume with `Last-Event-ID`; retain your cursor outside EventCore.
 

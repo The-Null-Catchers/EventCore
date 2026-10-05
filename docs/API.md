@@ -27,6 +27,7 @@ All routes except health/readiness/login require `Authorization: Bearer <api-key
 | POST `/v1/topics/{topic}/groups/{group}/leave` | member | ok; invalidates outstanding generation | consume |
 | POST `/v1/topics/{topic}/groups/{group}/pull` | member, epoch, limit? (default100) | partition deliveries with events[], token, epoch | consume |
 | POST `/v1/topics/{topic}/groups/{group}/ack` | member, epoch, partition, token | ok; durably commits next offset | consume |
+| POST `/v1/topics/{topic}/groups/{group}/commit` | member, epoch, partition, token, next_offset | ok; commits a processed prefix, releases lease | consume |
 | POST `/v1/topics/{topic}/groups/{group}/nack` | same as ack | ok; leaves committed offset unchanged | consume |
 | POST `/v1/topics/{topic}/groups/{group}/reset` | partition, offset, confirm:true | ok; rejects live members | admin |
 | POST `/v1/webhooks` | topic, url, secret (>=32 chars), max_attempts (1..20), delay_seconds (1..3600), paused? | 201 ok; list to retrieve generated ID | admin |
@@ -57,7 +58,8 @@ Partitions use FNV-1a over UTF-8 key bytes modulo immutable partition count. Eve
 1. Create a group with earliest/latest. That start choice applies when the group is created, not on every join.
 2. Join with a unique member ID and store the returned epoch.
 3. Pull with that member/epoch; each returned partition batch has a lease token.
-4. Finish all events in a batch, then ack its token. On failure nack; on no ack the lease expires.
+4. Finish all events in a batch, then ack its token. To save a processed prefix, POST `commit` with `next_offset` equal to the last processed event offset plus one (Python `delivery.commit(next_offset)` / JS `delivery.commit(nextOffset)`). It must be greater than the currently committed offset and no greater than this batch’s last offset plus one. On failure nack; on no ack the lease expires.
+   A successful partial commit releases the entire lease; pull again to receive the remaining suffix with a new token. The old token cannot ack, nack or commit again. Offset persistence failure preserves both the old offset and lease. Membership/generation changes and expired leases return HTTP 409. A missing or invalid next_offset returns HTTP 400. This operation cannot skip beyond delivered events or rewind; use administrative reset for replay.
 5. Rejoin on HTTP409; older delivery tokens cannot move the group offset after ownership changes.
 6. Pull regularly to renew membership (default TTL30s). There is no per-event ack or explicit lease extension yet. Leave on shutdown.
 

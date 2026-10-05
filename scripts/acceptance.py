@@ -87,8 +87,16 @@ if phase == 'before':
     consumed = set()
     first = client.pull('orders', 'billing', 'consumer-a', both['epoch'], 100)
     for batch in first:
-        consumed.update(event['id'] for event in batch.events)
-        batch.ack()
+        prefix = batch.events[:5]
+        batch.commit(prefix[-1]['offset'] + 1)
+        consumed.update(event['id'] for event in prefix)
+        try:
+            batch.ack()
+            raise AssertionError('settled token remained usable')
+        except EventCoreError as error:
+            assert error.status == 409
+    partial = client.request('GET', '/v1/topics/orders/groups/billing')
+    assert sum(partial['lag'].values()) == 10000 - len(consumed)
     client.request('POST', '/v1/topics/orders/groups/billing/leave', {'member': 'consumer-a'})
     reassigned = client.request('GET', '/v1/topics/orders/groups/billing')
     assert set(reassigned['members'][0]['partitions']) == {0, 1, 2, 3}

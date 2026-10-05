@@ -14,6 +14,7 @@ The upstream repository was empty on initial inspection. No existing architectur
 | Key routing and unkeyed balancing | Broker tests + SDK acceptance script |
 | Group assignment, stale-generation/lease rejection, redelivery | Coordinator tests with two members and expiring leases |
 | Failed metadata commit does not advance offsets | Coordinator failure-injection test |
+| Partial commit → suffix redelivery → restart; stale tokens rejected | Coordinator recovery/fencing tests, scoped HTTP tests, SDK tests; Docker acceptance exercises partial commits |
 | Authentication, CSRF, scopes and workspace isolation | HTTP API tests |
 | Optional schema persists and blocks invalid data/external refs | Broker schema test |
 | HTTP 500 → bounded retries → durable DLQ → source commit | Webhook integration test using injected HTTP transport |
@@ -32,7 +33,7 @@ The local environment does not provide Docker or PostgreSQL. Local unit/integrat
 
 1. Complete and test a professional dashboard against these real APIs. No dashboard screenshots exist yet.
 2. Add producer idempotency with documented recovery and deduplication boundaries.
-3. Add explicit manual offset commit operations alongside the current fenced batch ack protocol; auto commit should remain opt-in.
+3. Explicit fenced processed-prefix commits are implemented alongside batch ack, with no automatic commit. Verify the new exact SHA in CI before release.
 4. Add timestamp/range replay sessions and replay-to-topic operations, bounded export/import, and DLQ retry/discard operations.
 5. Add WebSocket consumers and JS/Python asynchronous transport parity, with connection recovery tests.
 6. Add webhook custom-header support, per-attempt historical rows (currently the latest state per event), real external endpoint testing, and terminal 4xx classification. Current retries remain bounded.

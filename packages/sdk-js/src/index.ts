@@ -1,7 +1,7 @@
 export interface EventInput<T=unknown> { type: string; key?: string; headers?: Record<string,string>; data: T }
 export interface Event<T=unknown> extends EventInput<T> { id: string; topic: string; partition: number; offset: number; timestamp: string }
 export interface Batch { partition: number; token: string; epoch: number; events: Event[] }
-export interface Delivery extends Batch { ack(): Promise<void>; nack(): Promise<void> }
+export interface Delivery extends Batch { ack(): Promise<void>; nack(): Promise<void>; commit(nextOffset: number): Promise<void> }
 export interface Group { epoch: number; offsets: Record<string,number>; lag: Record<string,number>; members: {id:string;partitions:number[]}[] }
 export class EventCoreError extends Error { constructor(readonly status:number, message:string){super(message)} }
 const sleep=(ms:number)=>new Promise<void>(resolve=>setTimeout(resolve,ms));
@@ -32,7 +32,7 @@ export class EventCore {
   async pull(topic:string,group:string,member:string,epoch:number,limit=100):Promise<Delivery[]>{
     const path=this.groupPath(topic,group);
     const batches=await this.request<Batch[]>('POST',`${path}/pull`,{member,epoch,limit});
-    return batches.map(batch=>({...batch,ack:async()=>{await this.request('POST',`${path}/ack`,{member,epoch:batch.epoch,partition:batch.partition,token:batch.token})},nack:async()=>{await this.request('POST',`${path}/nack`,{member,epoch:batch.epoch,partition:batch.partition,token:batch.token})}}));
+    return batches.map(batch=>({...batch,commit:async(nextOffset:number)=>{await this.request('POST',`${path}/commit`,{member,epoch:batch.epoch,partition:batch.partition,token:batch.token,next_offset:nextOffset})},ack:async()=>{await this.request('POST',`${path}/ack`,{member,epoch:batch.epoch,partition:batch.partition,token:batch.token})},nack:async()=>{await this.request('POST',`${path}/nack`,{member,epoch:batch.epoch,partition:batch.partition,token:batch.token})}}));
   }
   async subscribe(topic:string,options:{group:string;member:string;signal:AbortSignal},callback:(delivery:Delivery)=>Promise<void>):Promise<void>{
     let epoch=(await this.join(topic,options.group,options.member)).epoch;
