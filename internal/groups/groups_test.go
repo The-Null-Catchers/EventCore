@@ -165,3 +165,93 @@ func TestConcurrentJoins(t *testing.T) {
 		t.Fatal(seen)
 	}
 }
+
+func TestPartialCommitRecoveryAndRedelivery(t *testing.T) {
+	c, b, store := setup(t)
+	state, _ := c.Join("demo", "orders", "billing", "a")
+	batches, _ := c.Pull("demo", "orders", "billing", "a", state.Epoch, 10)
+	d := batches[0]
+	for _, offset := range []int64{-1, 0, 11} {
+		if err := c.Commit("demo", "orders", "billing", "a", d.Epoch, d.Partition, d.Token, offset); err == nil {
+			t.Fatalf("invalid commit %d accepted", offset)
+		}
+	}
+	store.fail = true
+	if err := c.Commit("demo", "orders", "billing", "a", d.Epoch, d.Partition, d.Token, 3); err == nil {
+		t.Fatal("failed metadata commit accepted")
+	}
+	state, _ = c.Inspect("demo", "orders", "billing")
+	if state.Offsets[d.Partition] != 0 {
+		t.Fatal("advanced on failure")
+	}
+	store.fail = false
+	if err := c.Commit("demo", "orders", "billing", "a", d.Epoch, d.Partition, d.Token, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Ack("demo", "orders", "billing", "a", d.Epoch, d.Partition, d.Token, false); err != ErrFenced {
+		t.Fatal("old token usable", err)
+	}
+	remaining, err := c.Pull("demo", "orders", "billing", "a", d.Epoch, 10)
+	if err != nil || len(remaining) != 1 || remaining[0].Token == d.Token || remaining[0].Events[0].Offset != 3 || len(remaining[0].Events) != 7 {
+		t.Fatal("suffix was not redelivered", remaining, err)
+	}
+	// Restart before acknowledging the suffix: only the persisted prefix survives.
+	restarted, err := New(b, store, time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ = restarted.Join("demo", "orders", "billing", "a")
+	if state.Offsets[d.Partition] != 3 || state.Lag[d.Partition] != 7 {
+		t.Fatal(state)
+	}
+	if err := restarted.Commit("demo", "orders", "billing", "a", d.Epoch, d.Partition, d.Token, 4); err != ErrFenced {
+		t.Fatal(err)
+	}
+	recovered, _ := restarted.Pull("demo", "orders", "billing", "a", state.Epoch, 10)
+	for _, delivery := range recovered {
+		if err := restarted.Commit("demo", "orders", "billing", "a", delivery.Epoch, delivery.Partition, delivery.Token, delivery.Events[len(delivery.Events)-1].Offset+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, _ = restarted.Inspect("demo", "orders", "billing")
+	if state.Lag[d.Partition] != 0 {
+		t.Fatal(state)
+	}
+}
+
+func TestPartialCommitFencing(t *testing.T) {
+	for _, scenario := range []string{"member", "token", "partition", "epoch", "expiry", "rebalance", "member expiry"} {
+		t.Run(scenario, func(t *testing.T) {
+			c, _, _ := setup(t)
+			now := time.Now()
+			c.now = func() time.Time { return now }
+			s, _ := c.Join("demo", "orders", "billing", "a")
+			ds, _ := c.Pull("demo", "orders", "billing", "a", s.Epoch, 10)
+			d := ds[0]
+			member, token, partition, epoch := "a", d.Token, d.Partition, d.Epoch
+			switch scenario {
+			case "member":
+				member = "b"
+			case "token":
+				token = "wrong"
+			case "partition":
+				partition = 99
+			case "epoch":
+				epoch++
+			case "expiry":
+				now = now.Add(2 * time.Second)
+			case "rebalance":
+				c.Join("demo", "orders", "billing", "b")
+			case "member expiry":
+				now = now.Add(2 * time.Minute)
+			}
+			if err := c.Commit("demo", "orders", "billing", member, epoch, partition, token, 3); err != ErrFenced {
+				t.Fatal(err)
+			}
+			s, _ = c.Inspect("demo", "orders", "billing")
+			if s.Offsets[d.Partition] != 0 {
+				t.Fatal("stale consumer advanced offset")
+			}
+		})
+	}
+}

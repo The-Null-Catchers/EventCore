@@ -23,6 +23,8 @@ func (testAuth) Authenticate(_ context.Context, token string, cookie bool) (meta
 	switch token {
 	case "admin":
 		p.Role = "owner"
+	case "consume":
+		p.Scopes = []string{"topic:orders:consume"}
 	case "produce":
 		p.Scopes = []string{"topic:orders:produce"}
 	case "other":
@@ -186,4 +188,46 @@ func TestSSEReceivesRealAppendedEvent(t *testing.T) {
 		}
 	}
 	t.Fatal("SSE did not emit durable event", scanner.Err())
+}
+
+func TestManualCommitAPI(t *testing.T) {
+	h, b := apiFixture(t)
+	for i := 0; i < 12; i++ {
+		b.Publish("demo", "orders", storage.Input{Type: "order", Data: json.RawMessage(`{}`)})
+	}
+	path := "/v1/topics/orders/groups/billing"
+	request(h, "POST", "/v1/topics/orders/groups", "admin", `{"name":"billing","start":"earliest"}`)
+	w := request(h, "POST", path+"/join", "consume", `{"member":"a"}`)
+	var state groups.Snapshot
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"member": "a", "epoch": state.Epoch, "limit": 10})
+	w = request(h, "POST", path+"/pull", "consume", string(payload))
+	var ds []groups.Delivery
+	if err := json.Unmarshal(w.Body.Bytes(), &ds); err != nil || len(ds) != 4 {
+		t.Fatal(w.Code, w.Body, err)
+	}
+	d := ds[0]
+	body := map[string]any{"member": "a", "epoch": d.Epoch, "partition": d.Partition, "token": d.Token}
+	payload, _ = json.Marshal(body)
+	if w = request(h, "POST", path+"/commit", "consume", string(payload)); w.Code != 400 {
+		t.Fatal(w.Code, w.Body)
+	}
+	body["next_offset"] = 1
+	payload, _ = json.Marshal(body)
+	for _, tc := range []struct {
+		token string
+		code  int
+	}{{"produce", 403}, {"other", 400}, {"consume", 200}, {"consume", 409}} {
+		w = request(h, "POST", path+"/commit", tc.token, string(payload))
+		if w.Code != tc.code {
+			t.Fatal(tc.token, w.Code, w.Body)
+		}
+	}
+	w = request(h, "GET", path, "consume", "")
+	json.Unmarshal(w.Body.Bytes(), &state)
+	if state.Offsets[d.Partition] != 1 || state.Lag[d.Partition] != 2 {
+		t.Fatal(state)
+	}
 }

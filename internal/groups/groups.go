@@ -281,6 +281,16 @@ func (c *Coordinator) Pull(w, t, n, id string, epoch uint64, limit int) ([]Deliv
 	return out, nil
 }
 func (c *Coordinator) Ack(w, t, n, id string, epoch uint64, p int, token string, nack bool) error {
+	return c.settle(w, t, n, id, epoch, p, token, nack, nil)
+}
+
+// Commit durably advances a processed prefix and releases the delivery lease.
+// The unprocessed suffix is delivered again by the next Pull with a new token.
+func (c *Coordinator) Commit(w, t, n, id string, epoch uint64, p int, token string, offset int64) error {
+	return c.settle(w, t, n, id, epoch, p, token, false, &offset)
+}
+
+func (c *Coordinator) settle(w, t, n, id string, epoch uint64, p int, token string, nack bool, offset *int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	g, err := c.get(w, t, n)
@@ -294,9 +304,16 @@ func (c *Coordinator) Ack(w, t, n, id string, epoch uint64, p int, token string,
 	if !ok || epoch != g.state.Epoch || l.member != id || l.token != token || !l.expires.After(c.now()) || owners(g)[p] != id {
 		return ErrFenced
 	}
+	next := l.next
+	if offset != nil {
+		if *offset <= g.state.Offsets[p] || *offset > l.next {
+			return errors.New("commit offset must advance within the delivered batch")
+		}
+		next = *offset
+	}
 	if !nack {
 		s := clone(g.state)
-		s.Offsets[p] = l.next
+		s.Offsets[p] = next
 		if err = c.store.Save(s); err != nil {
 			return err
 		}

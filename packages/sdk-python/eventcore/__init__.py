@@ -31,10 +31,14 @@ class Delivery:
     def nack(self) -> None:
         self._settle('nack')
 
-    def _settle(self, operation: str) -> None:
+    def commit(self, next_offset: int) -> None:
+        """Commit a processed prefix; the remaining events are delivered again."""
+        self._settle('commit', {'next_offset': next_offset})
+
+    def _settle(self, operation: str, extra: dict | None = None) -> None:
         self.client.request('POST', self.client.group_path(self.topic, self.group) + '/' + operation,
                             {'member': self.member, 'epoch': self.batch['epoch'],
-                             'partition': self.batch['partition'], 'token': self.batch['token']})
+                             'partition': self.batch['partition'], 'token': self.batch['token'], **(extra or {})})
 
 class EventCore:
     def __init__(self, base_url: str, api_key: str, timeout: float = 10):

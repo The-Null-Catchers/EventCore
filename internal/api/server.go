@@ -595,13 +595,14 @@ func (s *Server) group(w http.ResponseWriter, r *http.Request, p metadata.Princi
 		return
 	}
 	var req struct {
-		Member    string `json:"member"`
-		Epoch     uint64 `json:"epoch"`
-		Partition int    `json:"partition"`
-		Token     string `json:"token"`
-		Limit     int    `json:"limit"`
-		Offset    int64  `json:"offset"`
-		Confirm   bool   `json:"confirm"`
+		Member     string `json:"member"`
+		Epoch      uint64 `json:"epoch"`
+		Partition  int    `json:"partition"`
+		Token      string `json:"token"`
+		Limit      int    `json:"limit"`
+		Offset     int64  `json:"offset"`
+		Confirm    bool   `json:"confirm"`
+		NextOffset *int64 `json:"next_offset"`
 	}
 	if err := body(w, r, &req); err != nil {
 		fail(w, 400, err)
@@ -628,6 +629,12 @@ func (s *Server) group(w http.ResponseWriter, r *http.Request, p metadata.Princi
 		result = deliveries
 	case "ack", "nack":
 		err = s.Groups.Ack(p.Workspace, topic, name, req.Member, req.Epoch, req.Partition, req.Token, parts[5] == "nack")
+	case "commit":
+		if req.NextOffset == nil {
+			fail(w, 400, errors.New("next_offset required"))
+			return
+		}
+		err = s.Groups.Commit(p.Workspace, topic, name, req.Member, req.Epoch, req.Partition, req.Token, *req.NextOffset)
 	case "reset":
 		if !req.Confirm {
 			fail(w, 400, errors.New("confirm=true required"))
