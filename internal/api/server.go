@@ -427,6 +427,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, errors.New("scope denied"))
 		return
 	}
+	if len(parts) == 4 && parts[3] == "export" && r.Method == "GET" {
+		s.export(w, r, p, topic)
+		return
+	}
+	if len(parts) == 4 && parts[3] == "replay" && r.Method == "POST" {
+		s.replay(w, r, p, topic)
+		return
+	}
 	if len(parts) == 3 && r.Method == "GET" {
 		cfg, err := s.Broker.Config(p.Workspace, topic)
 		if err != nil {
@@ -531,47 +539,19 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request, p metadata.Princi
 	return true
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request, p metadata.Principal, topic string) {
-	partition, err := strconv.Atoi(r.URL.Query().Get("partition"))
+	q, err := scanQuery(r)
 	if err != nil {
-		fail(w, 400, errors.New("partition required"))
+		fail(w, 400, err)
 		return
 	}
-	offset, err := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+	page, err := s.Broker.Scan(p.Workspace, topic, q)
 	if err != nil {
-		fail(w, 400, errors.New("offset required"))
+		fail(w, replayStatus(err), err)
 		return
 	}
-	limit := 100
-	if v := r.URL.Query().Get("limit"); v != "" {
-		limit, err = strconv.Atoi(v)
-		if err != nil {
-			fail(w, 400, err)
-			return
-		}
-	}
-	events, err := s.Broker.Read(p.Workspace, topic, partition, offset, limit)
-	if err != nil {
-		status := 400
-		if errors.Is(err, storage.ErrRange) {
-			status = 416
-		}
-		fail(w, status, err)
-		return
-	}
-	next := offset
-	filtered := []storage.Event{}
-	for _, e := range events {
-		next = e.Offset + 1
-		if kind := r.URL.Query().Get("type"); kind != "" && kind != e.Type {
-			continue
-		}
-		if key := r.URL.Query().Get("key"); key != "" && key != e.Key {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	reply(w, 200, map[string]any{"events": filtered, "next_offset": next})
+	reply(w, 200, page)
 }
+
 func (s *Server) group(w http.ResponseWriter, r *http.Request, p metadata.Principal, topic string, parts []string) {
 	if len(parts) == 4 && r.Method == "POST" {
 		var req struct {

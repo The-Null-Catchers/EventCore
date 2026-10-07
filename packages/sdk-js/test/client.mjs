@@ -21,3 +21,13 @@ test('producer idempotency keys are explicit and response preserves receipt',asy
  globalThis.fetch=async(url,options)=>{calls++;assert.equal(JSON.parse(options.body).idempotency_key,'req-123');return Response.json({id:'same',deduplicated:true})};
  try{const result=await client.publish('orders',{type:'created',data:{},idempotency_key:'req-123'});assert.equal(result.id,'same');assert.equal(result.deduplicated,true);assert.equal(calls,1)}finally{globalThis.fetch=original}
 });
+test('replay scan encodes filters and copy carries fixed range and run ID',async()=>{
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(url,options)=>{calls++;if(options.method==='GET'){const q=new URL(url).searchParams;assert.equal(q.get('offset'),'0');assert.equal(q.get('end_offset'),'50');assert.equal(q.get('type'),'order.created');return Response.json({events:[],next_offset:20,end_offset:50,scanned:20,done:false})};const body=JSON.parse(options.body);assert.equal(body.replay_id,'run-1');assert.equal(body.end_offset,50);assert.equal(body.confirm,true);return Response.json({receipts:[],next_offset:20,end_offset:50,done:false,scanned:20})};
+ try{const page=await client.scan('orders',{partition:1,offset:0,end_offset:50,type:'order.created'});assert.equal(page.next_offset,20);await client.replay('orders',{target:'archive',replay_id:'run-1',partition:1,offset:0,end_offset:50});assert.equal(calls,2)}finally{globalThis.fetch=original}
+});
+test('replay failures expose durable prefix without retrying mutation',async()=>{
+ const original=globalThis.fetch;let calls=0;const progress={error:'disk pressure',receipts:[{source_offset:5}],next_offset:6,done:false};
+ globalThis.fetch=async()=>{calls++;return Response.json(progress,{status:503})};
+ try{await assert.rejects(client.replay('orders',{target:'archive',replay_id:'run',partition:0,offset:5,end_offset:20}),e=>e instanceof EventCoreError&&e.status===503&&e.details.next_offset===6);assert.equal(calls,1)}finally{globalThis.fetch=original}
+});

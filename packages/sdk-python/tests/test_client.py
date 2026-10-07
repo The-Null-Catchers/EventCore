@@ -42,5 +42,27 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(call.call_count, 1)
             self.assertEqual(call.call_args.args[2]['idempotency_key'], 'req-123')
 
+    def test_scan_and_replay_use_fixed_cursor(self):
+        client = EventCore('https://example.com', 'key')
+        with patch.object(client, 'request', return_value={'next_offset': 20}) as call:
+            client.scan('orders', 1, 0, end_offset=50, type='order.created')
+            self.assertIn('end_offset=50', call.call_args.args[1])
+            client.replay('orders', 'archive', 'run-1', 1, 0, 50)
+            self.assertEqual(call.call_args.args[2]['replay_id'], 'run-1')
+            self.assertEqual(call.call_args.args[2]['end_offset'], 50)
+            self.assertTrue(call.call_args.args[2]['confirm'])
+
+    def test_replay_failure_exposes_progress_without_retry(self):
+        import io
+        from eventcore import EventCoreError
+        client = EventCore('https://example.com', 'key')
+        error = urllib.error.HTTPError('https://example.com', 503, 'failure', {},
+                    io.BytesIO(b'{"error":"disk pressure","next_offset":6,"receipts":[],"done":false}'))
+        with patch('urllib.request.urlopen', side_effect=error) as call:
+            with self.assertRaises(EventCoreError) as raised:
+                client.replay('orders', 'archive', 'run', 0, 5, 20)
+            self.assertEqual(raised.exception.details['next_offset'], 6)
+            self.assertEqual(call.call_count, 1)
+
 if __name__ == '__main__':
     unittest.main()

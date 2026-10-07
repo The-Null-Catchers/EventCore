@@ -23,6 +23,10 @@ func (testAuth) Authenticate(_ context.Context, token string, cookie bool) (meta
 	switch token {
 	case "admin":
 		p.Role = "owner"
+	case "read":
+		p.Scopes = []string{"topic:orders:read"}
+	case "copy":
+		p.Scopes = []string{"topic:orders:read", "topic:archive:produce"}
 	case "consume":
 		p.Scopes = []string{"topic:orders:consume"}
 	case "produce":

@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 class EventCoreError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, details: dict | None = None):
         super().__init__(message)
         self.status = status
+        self.details = details
 
 @dataclass
 class Delivery:
@@ -59,13 +60,15 @@ class EventCore:
             except urllib.error.HTTPError as error:
                 payload = error.read(2 << 20)
                 try:
-                    message = json.loads(payload).get('error', str(error))
+                    details = json.loads(payload)
+                    message = details.get('error', str(error))
                 except (ValueError, AttributeError):
                     message = str(error)
+                    details = None
                 if method == 'GET' and error.code in (429, 502, 503, 504) and attempt + 1 < attempts:
                     time.sleep(0.2 * 2 ** attempt)
                     continue
-                raise EventCoreError(error.code, message) from error
+                raise EventCoreError(error.code, message, details) from error
             except (urllib.error.URLError, TimeoutError):
                 if attempt + 1 == attempts:
                     raise
@@ -86,6 +89,19 @@ class EventCore:
     def publish_batch(self, topic: str, events: list[dict]) -> list[dict]:
         """Each result contains event OR error. Batches are ordered, non-atomic."""
         return self.request('POST', self.topic_path(topic) + '/events/batch', {'events': events})['results']
+
+    def scan(self, topic: str, partition: int, offset: int, limit: int = 100, **filters: Any) -> dict:
+        """Scan a bounded page; reuse end_offset and advance next_offset until done."""
+        query = urllib.parse.urlencode({'partition': partition, 'offset': offset, 'limit': limit, **filters})
+        return self.request('GET', self.topic_path(topic) + '/events?' + query)
+
+    def replay(self, topic: str, target: str, replay_id: str, partition: int,
+               offset: int, end_offset: int, limit: int = 100, **filters: Any) -> dict:
+        """Copy a bounded page, with explicit source snapshot and stable run ID."""
+        return self.request('POST', self.topic_path(topic) + '/replay',
+                            {'target': target, 'replay_id': replay_id, 'partition': partition,
+                             'offset': offset, 'end_offset': end_offset, 'limit': limit,
+                             'confirm': True, **filters})
 
     def join(self, topic: str, group: str, member: str) -> dict:
         return self.request('POST', self.group_path(topic, group) + '/join', {'member': member})

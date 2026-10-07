@@ -3,7 +3,10 @@ export interface Event<T=unknown> extends EventInput<T> { deduplicated?: boolean
 export interface Batch { partition: number; token: string; epoch: number; events: Event[] }
 export interface Delivery extends Batch { ack(): Promise<void>; nack(): Promise<void>; commit(nextOffset: number): Promise<void> }
 export interface Group { epoch: number; offsets: Record<string,number>; lag: Record<string,number>; members: {id:string;partitions:number[]}[] }
-export class EventCoreError extends Error { constructor(readonly status:number, message:string){super(message)} }
+export interface ScanOptions { partition:number; offset:number; end_offset?:number; limit?:number; from_time?:string; until_time?:string; type?:string; key?:string; id?:string }
+export interface Page { events:Event[]; next_offset:number; end_offset:number; scanned:number; done:boolean }
+export interface ReplayResult { receipts:{source_offset:number;event:Event}[]; next_offset:number; end_offset:number; scanned:number; done:boolean; error?:string }
+export class EventCoreError extends Error { constructor(readonly status:number, message:string, readonly details?:unknown){super(message)} }
 const sleep=(ms:number)=>new Promise<void>(resolve=>setTimeout(resolve,ms));
 export class EventCore {
   private baseUrl:string;
@@ -14,7 +17,7 @@ export class EventCore {
       try{
         const response=await fetch(this.baseUrl+path,{method,headers:{Authorization:`Bearer ${this.options.apiKey}`,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(this.options.timeoutMs??10000)});
         const data=await response.json();
-        if(!response.ok)throw new EventCoreError(response.status,data.error??`HTTP ${response.status}`);
+        if(!response.ok)throw new EventCoreError(response.status,data.error??`HTTP ${response.status}`,data);
         return data as T;
       }catch(error){
         const transient=!(error instanceof EventCoreError)||[429,502,503,504].includes(error.status);
@@ -28,6 +31,13 @@ export class EventCore {
   groupPath(topic:string,group:string){return `${this.topicPath(topic)}/groups/${encodeURIComponent(group)}`}
   publish<T>(topic:string,event:EventInput<T>):Promise<Event<T>>{return this.request('POST',`${this.topicPath(topic)}/events`,event)}
   async publishBatch(topic:string,events:EventInput[]):Promise<({event:Event}|{error:string;status?:number})[]>{const response=await this.request<{results:({event:Event}|{error:string;status?:number})[]}>('POST',`${this.topicPath(topic)}/events/batch`,{events});return response.results}
+  scan(topic:string,options:ScanOptions):Promise<Page>{
+    const query=new URLSearchParams();for(const [key,value] of Object.entries(options)){if(value!==undefined)query.set(key,String(value))}
+    return this.request('GET',`${this.topicPath(topic)}/events?${query}`)
+  }
+  replay(topic:string,options:ScanOptions & {end_offset:number;target:string;replay_id:string}):Promise<ReplayResult>{
+    return this.request('POST',`${this.topicPath(topic)}/replay`,{...options,confirm:true})
+  }
   join(topic:string,group:string,member:string):Promise<Group>{return this.request('POST',`${this.groupPath(topic,group)}/join`,{member})}
   async pull(topic:string,group:string,member:string,epoch:number,limit=100):Promise<Delivery[]>{
     const path=this.groupPath(topic,group);

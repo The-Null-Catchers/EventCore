@@ -12,7 +12,7 @@ EventCore is intended for self-hosted event-driven services, IoT ingestion and r
 - Exclusive process lock on the data directory, restart recovery, repair of an incomplete active tail and refusal of complete-record corruption.
 - Single and bounded, non-atomic batch publication; durable bounded producer idempotency; optional JSON Schema 2020-12 validation on event `data`. External schema references are prohibited.
 - Fenced consumer groups, deterministic partition assignment, membership expiry, batch acknowledgments, explicit processed-prefix commits, nack/redelivery, visibility leases and durable next-offset commits.
-- Safe group resets when no members are active; replay by resetting offsets or reading immutable retained ranges.
+- Safe group resets when no members are active; bounded timestamp/range replay cursors, copy to another topic with source provenance, and paginated JSONL export.
 - Time/size retention of sealed segments and explicit HTTP 416 for offsets that have been removed.
 - HTTPS webhooks with HMAC timestamp signatures, encrypted secrets, persistent attempt state, bounded exponential retry, delivery logs, pause/resume and durable DLQ routing.
 - Bounded SSE streams using disk cursors and notification channels, with connection limits and slow-client write deadlines.
@@ -93,12 +93,12 @@ npm test --prefix packages/sdk-js
 PYTHONPATH=packages/sdk-python python -m unittest discover -s packages/sdk-python/tests -v
 ```
 
-Set `TEST_DATABASE_URL` for real PostgreSQL tests; without it those tests **skip**, rather than replacing PostgreSQL with a mock. CI runs these tests with PostgreSQL and separately starts Docker Compose, publishes 10,000 events using the Python SDK, checks offsets/key ordering/lag/two-member assignment, stops a member, drains and commits, restarts the broker and replays 10,001 retained events. The HTTP-500/retry/DLQ integration test injects a failing HTTP transport; a real external webhook endpoint test remains a release requirement.
+Set `TEST_DATABASE_URL` for real PostgreSQL tests; without it those tests **skip**, rather than replacing PostgreSQL with a mock. CI runs these tests with PostgreSQL and separately starts Docker Compose, publishes 10,000 events using the Python SDK, checks offsets/key ordering/lag/two-member assignment, stops a member, drains and commits, restarts the broker and replays 10,001 retained events. It also copies a timestamp-filtered snapshot to an archive topic and checks safe page retry within the bounded idempotency window. The HTTP-500/retry/DLQ integration test injects a failing HTTP transport; a real external webhook endpoint test remains a release requirement.
 
 Read [storage format](docs/STORAGE.md), [acceptance coverage and release gaps](docs/STATUS.md), and [security and operational limits](docs/SECURITY.md). Benchmarks are reproducible with `go test -bench . -benchmem ./internal/storage`; report your own filesystem and fsync behavior. No Kafka-scale throughput claim is made.
 
 ## Before v0.1.0
 
-The dashboard, WebSocket group consumers, timestamp/range replay sessions, replay to another topic, DLQ retry/discard management, richer schema lifecycle, user/password-reset/role-management flows, safe topic deletion, disk-pressure warning UX, OpenTelemetry, full OpenAPI coverage, measured load scenarios and release screenshots/evidence remain open. This is not a complete production release. See the tracked gap list for acceptance work, rather than treating every prompt requirement as implemented.
+The dashboard, WebSocket group consumers, server-persisted replay jobs, event import, DLQ retry/discard management, richer schema lifecycle, user/password-reset/role-management flows, safe topic deletion, disk-pressure warning UX, OpenTelemetry, full OpenAPI coverage, measured load scenarios and release screenshots/evidence remain open. This is not a complete production release. See the tracked gap list for acceptance work, rather than treating every prompt requirement as implemented.
 
 Future clustering would require persistent broker identity, coordinated partition leadership, follower replication, leader fencing and failover. None of those is simulated here. Redis is intentionally absent because it currently has no authoritative coordination role.

@@ -19,7 +19,9 @@ All routes except health/readiness/login require `Authorization: Bearer <api-key
 | GET `/v1/topics/{topic}` | none | topic + partition bounds | read |
 | POST `/v1/topics/{topic}/events` | type, key?, headers?, data | 201 complete stored event | produce |
 | POST `/v1/topics/{topic}/events/batch` | events[], 1..100 | results[] with event OR error | produce |
-| GET `/v1/topics/{topic}/events` | partition, offset, limit? (1..1000), type?, key? | events[], next_offset | read |
+| GET `/v1/topics/{topic}/events` | partition, offset, limit? (1..1000 scanned), end_offset?, from_time?, until_time?, type?, key?, id? | events[], next_offset, end_offset, scanned, done | read |
+| GET `/v1/topics/{topic}/export` | same bounded range query as events | JSONL + cursor response headers | read |
+| POST `/v1/topics/{topic}/replay` | partition, offset, end_offset, target, replay_id, confirm:true, limit? (1..100 scanned), from_time?, until_time?, type?, key?, id? | copied receipts + cursor; partial progress on failure | source read + target produce |
 | GET `/v1/topics/{topic}/stream` | partition, offset? (default latest), type?; Last-Event-ID header | bounded SSE events and heartbeats | read |
 | POST `/v1/topics/{topic}/groups` | name, start: earliest or latest | 201 ok | admin |
 | GET `/v1/topics/{topic}/groups/{group}` | none | epoch, offsets, members, assignments, lag | consume |
@@ -74,3 +76,21 @@ Mutation retries are not automatically safe: a network failure can follow a succ
 The receipt index holds at most the newest 4,096 idempotent events per topic ordered by server timestamp/ID, expires them after 24 hours, and is rebuilt from retained checksummed records on restart (including after an ambiguous append). Retention, age expiry or capacity eviction ends deduplication for that key; subsequent reuse can append again. No unbounded or exactly-once guarantee is claimed. Keep server clocks synchronized. Non-idempotent publications remain unchanged. SDK publication remains single-attempt: callers may explicitly retry with the same key within these boundaries. A retry during partition fencing is rejected until recovery; a retained receipt can be returned under disk admission pressure because it does not write. Successful HTTP status stays 201 for new and deduplicated events; publication counters count only new appends. Session tokens, API key values and webhook signing secrets must never be logged.
 
 SSE emits `id: <offset>` followed by `data: <JSON envelope>`, and `: heartbeat` comments when idle. Select one partition per connection. Last-Event-ID resumes at the following offset. Streams are observers with no group ack semantics and bounded write deadlines; reconnect and resume after a slow-client disconnect. Authenticated SSE access is rechecked periodically (approximately every 30–40 seconds) so expired/revoked keys do not retain an indefinite stream. WebSocket consumers and full machine-readable OpenAPI are pending.
+
+## Bounded replay and export
+
+Read a fixed partition snapshot with `GET /v1/topics/orders/events?partition=0&offset=0&limit=100`. Save its `end_offset`, then keep that value on subsequent pages and advance to `next_offset` until `done:true`. The exclusive end offset excludes later appends. Filters use `from_time` inclusive and `until_time` exclusive (RFC3339), plus exact ID/type/key. Limits bound **scanned** records, so a filtered page can be empty while `done:false`; keep advancing. Timestamp order is not assumed because server clocks can change. Each page reads at most 1,000 records / approximately 4 MiB, including one final record beyond the byte threshold. Retention is not pinned: if your next offset is deleted, HTTP416 requires an explicit range decision. These are caller-owned temporary replay cursors, not server-persisted jobs.
+
+Export uses the same query and returns `application/x-ndjson`; response headers `X-EventCore-Next-Offset`, `X-EventCore-End-Offset`, `X-EventCore-Scanned` and `X-EventCore-Done` describe the page, including empty pages. Exported events retain original IDs/timestamps and are never removed from the log. Import remains a future operation.
+
+Copy to a different existing topic (in the same authenticated workspace):
+
+```json
+{"partition":0,"offset":0,"end_offset":1000,"limit":100,"target":"orders.archive","replay_id":"recovery-2026-10-07","confirm":true,"from_time":"2026-10-01T10:00:00Z","until_time":"2026-10-01T11:00:00Z"}
+```
+
+POST this to `/v1/topics/orders/replay`. Both source read and destination produce permissions are required; same-topic replay is rejected. The server audits the attempt before writing. Each copied event receives a new ID/offset/timestamp, preserves type/key/data and passes normal destination size/schema/disk checks. Reserved `eventcore.replay.*` headers identify run ID and original ID/topic/partition/offset; existing reserved values are replaced. If the augmented header count or event size exceeds destination limits, copying stops with a clear error. Consumer-group offsets and the source log are untouched. Existing consumers can observe the copied topic, or use inactive-group reset to replay the original log.
+
+On success the response contains `receipts`, `next_offset`, `end_offset`, `scanned` and `done`. On partial failure the HTTP400/409/503 response also contains completed receipts, the failed source offset as `next_offset`, and `error`; no later selected event is copied. Earlier successful writes remain durable. Reuse the same `replay_id` across pages and retries: a derived idempotency key per original event prevents duplicates **only within the producer receipt age/capacity/retention window**. Large jobs or delayed retries can exceed that window; this is at-least-once copying, not transactional/exactly-once replay. A new run ID intentionally creates fresh copies. Do not automatically retry mutations after arbitrary network failures.
+
+Python: `client.scan(topic, partition, offset, end_offset=..., from_time=...)` and `client.replay(topic, target, replay_id, partition, offset, end_offset, ...)`. TypeScript: `client.scan(topic, options)` and `client.replay(topic, {...options, target, replay_id, end_offset})`. SDK errors surface HTTP failures with the response body in `error.details` (including partial replay progress); callers may explicitly retry the fixed page/run ID within the documented deduplication boundary.
