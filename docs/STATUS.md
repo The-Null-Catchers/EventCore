@@ -18,6 +18,7 @@ The upstream repository was empty on initial inspection. No existing architectur
 | Authentication, CSRF, scopes and workspace isolation | HTTP API tests |
 | Optional schema persists and blocks invalid data/external refs | Broker schema test |
 | HTTP 500 → bounded retries → durable DLQ → source commit | Webhook integration test using injected HTTP transport |
+| DLQ retry/discard, concurrent resolution, ambiguous prepare, restart recovery and retention pins | Disk/outbox fault tests, HTTP authorization/audit tests, PostgreSQL integration, webhook failure → DLQ → retry → successful delivery |
 | Encryption and SSRF address rules | Webhook security tests |
 | SDK publication does not blindly retry ambiguous failures | JS/Python SDK tests |
 | Bounded timestamp replay, unchanged source, scoped copying and partial-failure retry | Storage/API/SDK tests; Docker acceptance copies 10,001 retained events to archive |
@@ -36,7 +37,7 @@ The local environment does not provide Docker or PostgreSQL. Local unit/integrat
 1. Complete and test a professional dashboard against these real APIs. No dashboard screenshots exist yet.
 2. Durable bounded producer idempotency is implemented, with scope/age/capacity/retention boundaries documented. Exact-SHA external CI evidence remains required before release.
 3. Explicit fenced processed-prefix commits are implemented alongside batch ack, with no automatic commit. Verify the new exact SHA in CI before release.
-4. Bounded timestamp/range cursor replay, replay-to-topic and JSONL page export are implemented. Server-persisted replay jobs, import and DLQ retry/discard remain open.
+4. Bounded timestamp/range cursor replay, replay-to-topic and JSONL page export are implemented. Durable DLQ retry/discard decisions are implemented. Server-persisted replay jobs and import remain open.
 5. Add WebSocket consumers and JS/Python asynchronous transport parity, with connection recovery tests.
 6. Add webhook custom-header support, per-attempt historical rows (currently the latest state per event), real external endpoint testing, and terminal 4xx classification. Current retries remain bounded.
 7. Add topic update/delete with confirmation and auditing, schema version/lifecycle management and collision rules for user-created `.DLQ` names.

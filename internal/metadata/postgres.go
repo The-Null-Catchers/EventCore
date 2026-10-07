@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS api_keys(id text PRIMARY KEY,workspace_id text REFERE
 CREATE TABLE IF NOT EXISTS consumer_groups(workspace_id text REFERENCES workspaces(id),topic text NOT NULL,name text NOT NULL,state jsonb NOT NULL,PRIMARY KEY(workspace_id,topic,name));
 CREATE TABLE IF NOT EXISTS webhooks(id text PRIMARY KEY,workspace_id text REFERENCES workspaces(id),topic text NOT NULL,url text NOT NULL,encrypted_secret text NOT NULL,max_attempts int NOT NULL,delay_seconds int NOT NULL,paused bool NOT NULL DEFAULT false);
 CREATE TABLE IF NOT EXISTS webhook_attempts(subscription_id text REFERENCES webhooks(id),event_id text NOT NULL,attempt jsonb NOT NULL,PRIMARY KEY(subscription_id,event_id));
+CREATE TABLE IF NOT EXISTS dlq_resolutions(workspace_id text REFERENCES workspaces(id),topic text NOT NULL,partition int NOT NULL CHECK(partition>=0),offset_id bigint NOT NULL CHECK(offset_id>=0),decision jsonb NOT NULL,PRIMARY KEY(workspace_id,topic,partition,offset_id));
+CREATE INDEX IF NOT EXISTS dlq_pending ON dlq_resolutions(workspace_id,topic,partition,offset_id) WHERE decision->>'status'='pending';
 CREATE TABLE IF NOT EXISTS audit(id bigserial PRIMARY KEY,workspace_id text NOT NULL,actor text NOT NULL,action text NOT NULL,resource text NOT NULL,ip text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
 `)
 	if err != nil {

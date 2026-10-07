@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/The-Null-Catchers/EventCore/internal/deadletters"
 	"github.com/The-Null-Catchers/EventCore/internal/groups"
 	"github.com/The-Null-Catchers/EventCore/internal/metadata"
 	"github.com/The-Null-Catchers/EventCore/internal/storage"
@@ -38,6 +39,7 @@ type bucket struct {
 	count int
 }
 type Server struct {
+	DeadLetters  *deadletters.Manager
 	streams      map[string]int
 	Webhooks     *webhooks.Worker
 	WebhookAdmin WebhookAdmin
@@ -423,8 +425,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			action = "admin"
 		}
 	}
+	if len(parts) > 3 && parts[3] == "dead-letters" && r.Method != "GET" {
+		action = "admin"
+	}
 	if !Allowed(p, topic, action) {
 		fail(w, 403, errors.New("scope denied"))
+		return
+	}
+	if len(parts) > 3 && parts[3] == "dead-letters" {
+		s.deadLetters(w, r, p, topic, parts)
 		return
 	}
 	if len(parts) == 4 && parts[3] == "export" && r.Method == "GET" {
