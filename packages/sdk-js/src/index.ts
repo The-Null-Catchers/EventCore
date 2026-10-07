@@ -8,6 +8,8 @@ export interface Page { events:Event[]; next_offset:number; end_offset:number; s
 export interface ReplayResult { receipts:{source_offset:number;event:Event}[]; next_offset:number; end_offset:number; scanned:number; done:boolean; error?:string }
 export interface DLQDecision { workspace:string; topic:string; partition:number; offset:number; actor:string; action:"retry"|"discard"; status:"pending"|"complete"; created_at:string; completed_at?:string; receipt?:{id:string;topic:string;partition:number;offset:number;timestamp:string} }
 export interface DLQPage { entries:{event:Event;decision?:DLQDecision;error?:string}[]; next_offset:number; end_offset:number; scanned:number; done:boolean }
+export interface WebhookAttempt { attempts:number; status:"sending"|"unknown"|"retry"|"failed"|"delivered"|"dlq"; http_status:number; latency_ms:number; next_attempt_at:string; started_at?:string; completed_at?:string; error?:string }
+export interface WebhookHistoryPage { entries:{cursor:number;event_id:string;attempt:WebhookAttempt;recorded_at:string}[]; next_cursor:number; has_more:boolean }
 export class EventCoreError extends Error { constructor(readonly status:number, message:string, readonly details?:unknown){super(message)} }
 const sleep=(ms:number)=>new Promise<void>(resolve=>setTimeout(resolve,ms));
 export class EventCore {
@@ -39,6 +41,9 @@ export class EventCore {
   }
   replay(topic:string,options:ScanOptions & {end_offset:number;target:string;replay_id:string}):Promise<ReplayResult>{
     return this.request('POST',`${this.topicPath(topic)}/replay`,{...options,confirm:true})
+  }
+  webhookHistory(id:string,after=0,limit=50):Promise<WebhookHistoryPage>{
+    return this.request('GET',`/v1/webhooks/${encodeURIComponent(id)}/history?${new URLSearchParams({after:String(after),limit:String(limit)})}`)
   }
   deadLetters(topic:string,options:ScanOptions):Promise<DLQPage>{
     const query=new URLSearchParams();for(const [key,value] of Object.entries(options)){if(value!==undefined)query.set(key,String(value))}

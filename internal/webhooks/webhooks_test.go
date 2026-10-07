@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/The-Null-Catchers/EventCore/internal/deadletters"
 	"github.com/The-Null-Catchers/EventCore/internal/groups"
 	"github.com/The-Null-Catchers/EventCore/internal/storage"
@@ -15,11 +16,13 @@ import (
 )
 
 type memory struct {
-	subs     []Subscription
-	attempts map[string]Attempt
-	groups   []groups.State
-	decision deadletters.Decision
-	resolved bool
+	subs       []Subscription
+	attempts   map[string]Attempt
+	groups     []groups.State
+	decision   deadletters.Decision
+	resolved   bool
+	history    []Attempt
+	failStatus string
 }
 
 func (m *memory) Subscriptions(context.Context) ([]Subscription, error) { return m.subs, nil }
@@ -31,6 +34,10 @@ func (m *memory) Attempt(_ context.Context, s, e string) (Attempt, error) {
 	return m.attempts[s+e], nil
 }
 func (m *memory) SaveAttempt(_ context.Context, s, e string, a Attempt) error {
+	if a.Status == m.failStatus {
+		return errors.New("metadata unavailable")
+	}
+	m.history = append(m.history, a)
 	m.attempts[s+e] = a
 	return nil
 }

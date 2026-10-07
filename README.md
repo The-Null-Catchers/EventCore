@@ -14,7 +14,7 @@ EventCore is intended for self-hosted event-driven services, IoT ingestion and r
 - Fenced consumer groups, deterministic partition assignment, membership expiry, batch acknowledgments, explicit processed-prefix commits, nack/redelivery, visibility leases and durable next-offset commits.
 - Safe group resets when no members are active; bounded timestamp/range replay cursors, copy to another topic with source provenance, and paginated JSONL export.
 - Time/size retention of sealed segments and explicit HTTP 416 for offsets that have been removed.
-- HTTPS webhooks with HMAC timestamp signatures, encrypted secrets, persistent attempt state, bounded exponential retry, delivery logs, pause/resume and durable DLQ routing.
+- HTTPS webhooks with HMAC timestamp signatures, encrypted secrets/custom headers, persistent attempt state and transactional history, bounded exponential retry with Retry-After, terminal-error classification, delivery logs, pause/resume and durable DLQ routing.
 - Bounded SSE streams using disk cursors and notification channels, with connection limits and slow-client write deadlines.
 - PostgreSQL-backed bcrypt login, HttpOnly sessions, CSRF tokens, backend role checks, scoped expiring API keys, revocation and rate limits.
 - Python SDK/CLI and typed TypeScript SDK; safe GET retries, explicit mutation failures and fenced batch acknowledgments.

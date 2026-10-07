@@ -27,24 +27,31 @@ import (
 	"time"
 )
 
+var ErrStore = errors.New("webhook metadata unavailable")
+
 type Subscription struct {
-	ID              string `json:"id"`
-	Workspace       string `json:"workspace"`
-	Topic           string `json:"topic"`
-	URL             string `json:"url"`
-	Secret          string `json:"secret,omitempty"`
-	EncryptedSecret string `json:"-"`
-	MaxAttempts     int    `json:"max_attempts"`
-	DelaySeconds    int    `json:"delay_seconds"`
-	Paused          bool   `json:"paused"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	HeaderNames      []string          `json:"header_names,omitempty"`
+	EncryptedHeaders string            `json:"-"`
+	ID               string            `json:"id"`
+	Workspace        string            `json:"workspace"`
+	Topic            string            `json:"topic"`
+	URL              string            `json:"url"`
+	Secret           string            `json:"secret,omitempty"`
+	EncryptedSecret  string            `json:"-"`
+	MaxAttempts      int               `json:"max_attempts"`
+	DelaySeconds     int               `json:"delay_seconds"`
+	Paused           bool              `json:"paused"`
 }
 type Attempt struct {
-	Count      int       `json:"attempts"`
-	Next       time.Time `json:"next_attempt_at"`
-	Status     string    `json:"status"`
-	HTTPStatus int       `json:"http_status"`
-	LatencyMS  int64     `json:"latency_ms"`
-	Error      string    `json:"error,omitempty"`
+	StartedAt   time.Time  `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	Count       int        `json:"attempts"`
+	Next        time.Time  `json:"next_attempt_at"`
+	Status      string     `json:"status"`
+	HTTPStatus  int        `json:"http_status"`
+	LatencyMS   int64      `json:"latency_ms"`
+	Error       string     `json:"error,omitempty"`
 }
 type Store interface {
 	Subscriptions(context.Context) ([]Subscription, error)
@@ -62,6 +69,9 @@ type Worker struct {
 }
 
 func Encrypt(key []byte, secret string) (string, error) {
+	return encrypt(key, secret, "eventcore.webhook.v1")
+}
+func encrypt(key []byte, secret, purpose string) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -74,9 +84,12 @@ func Encrypt(key []byte, secret string) (string, error) {
 	if _, err = rand.Read(nonce); err != nil {
 		return "", err
 	}
-	return base64.StdEncoding.EncodeToString(aead.Seal(nonce, nonce, []byte(secret), []byte("eventcore.webhook.v1"))), nil
+	return base64.StdEncoding.EncodeToString(aead.Seal(nonce, nonce, []byte(secret), []byte(purpose))), nil
 }
 func Decrypt(key []byte, encrypted string) (string, error) {
+	return decrypt(key, encrypted, "eventcore.webhook.v1")
+}
+func decrypt(key []byte, encrypted, purpose string) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -90,7 +103,7 @@ func Decrypt(key []byte, encrypted string) (string, error) {
 		return "", errors.New("invalid encrypted secret")
 	}
 	nonce := raw[:aead.NonceSize()]
-	plain, err := aead.Open(nil, nonce, raw[aead.NonceSize():], []byte("eventcore.webhook.v1"))
+	plain, err := aead.Open(nil, nonce, raw[aead.NonceSize():], []byte(purpose))
 	return string(plain), err
 }
 
@@ -169,8 +182,13 @@ func (w *Worker) Initialize(ctx context.Context, s Subscription) error {
 	if err := ValidateURL(s.URL); err != nil {
 		return err
 	}
-	if len(s.Secret) < 32 || s.MaxAttempts < 1 || s.MaxAttempts > 20 || s.DelaySeconds < 1 || s.DelaySeconds > 3600 {
-		return errors.New("secret >=32 characters, attempts 1..20, delay 1..3600 required")
+	headers, err := NormalizeHeaders(s.Headers)
+	if err != nil {
+		return err
+	}
+	s.Headers = headers
+	if len(s.Secret) < 32 || len(s.Secret) > 1024 || s.MaxAttempts < 1 || s.MaxAttempts > 20 || s.DelaySeconds < 1 || s.DelaySeconds > 3600 {
+		return errors.New("secret 32..1024 bytes, attempts 1..20, delay 1..3600 required")
 	}
 	if len(w.Key) != 32 {
 		return errors.New("webhook encryption key must be 32 bytes")
@@ -179,7 +197,12 @@ func (w *Worker) Initialize(ctx context.Context, s Subscription) error {
 		return err
 	}
 	s.ID = storage.ID()
-	var err error
+	s.EncryptedHeaders, err = EncryptHeaders(w.Key, s.Headers)
+	if err != nil {
+		return err
+	}
+	s.HeaderNames = HeaderNames(s.Headers)
+	s.Headers = nil
 	s.EncryptedSecret, err = Encrypt(w.Key, s.Secret)
 	if err != nil {
 		return err
@@ -198,9 +221,12 @@ func (w *Worker) Initialize(ctx context.Context, s Subscription) error {
 		}
 	}
 	if err = w.Groups.Create(s.Workspace, s.Topic, "webhook-"+s.ID, "earliest"); err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrStore, err)
 	}
-	return w.Store.Create(ctx, s)
+	if err = w.Store.Create(ctx, s); err != nil {
+		return fmt.Errorf("%w: %v", ErrStore, err)
+	}
+	return nil
 }
 func (w *Worker) Tick(ctx context.Context) error {
 	if w.Client == nil {
@@ -213,15 +239,17 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var failures []error
 	for _, s := range subs {
 		if s.Paused {
 			continue
 		}
 		if err = w.deliver(ctx, s); err != nil {
 			slog.Error("webhook processing failed", "subscription", s.ID, "error", err)
+			failures = append(failures, fmt.Errorf("subscription %s: %w", s.ID, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 func (w *Worker) deliver(ctx context.Context, s Subscription) error {
 	group := "webhook-" + s.ID
@@ -255,50 +283,83 @@ func (w *Worker) deliver(ctx context.Context, s Subscription) error {
 			}
 			continue
 		}
-		if attempt.Count < s.MaxAttempts {
-			attempt.Count++
-			attempt.Status = "sending"
-			attempt.Next = w.Now().Add(30 * time.Second)
+
+		if attempt.Status == "sending" {
+			attempt.Status = "unknown"
+			attempt.Error = "delivery outcome unknown after interruption"
+			attempt.Next = time.Time{}
 			if err = w.Store.SaveAttempt(ctx, s.ID, event.ID, attempt); err != nil {
 				return err
 			}
-			payload, err := json.Marshal(event)
+		}
+		if attempt.Count < s.MaxAttempts && attempt.Status != "failed" {
+			// Validate configuration before consuming an attempt budget.
+			secret, err := Decrypt(w.Key, s.EncryptedSecret)
 			if err != nil {
 				return err
 			}
-			secret, err := Decrypt(w.Key, s.EncryptedSecret)
+			headers, err := DecryptHeaders(w.Key, s.EncryptedHeaders)
 			if err != nil {
 				return err
 			}
 			if err = ValidateURL(s.URL); err != nil {
 				return err
 			}
-			req, err := http.NewRequestWithContext(ctx, "POST", s.URL, bytes.NewReader(payload))
+			payload, err := json.Marshal(event)
 			if err != nil {
 				return err
 			}
+			attempt.Count++
+			attempt.Status = "sending"
+			attempt.StartedAt = w.Now().UTC()
+			attempt.CompletedAt = nil
+			attempt.HTTPStatus = 0
+			attempt.LatencyMS = 0
+			attempt.Error = ""
+			attempt.Next = attempt.StartedAt.Add(30 * time.Second)
+			if err = w.Store.SaveAttempt(ctx, s.ID, event.ID, attempt); err != nil {
+				return err
+			}
+			deliveryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			req, err := http.NewRequestWithContext(deliveryCtx, "POST", s.URL, bytes.NewReader(payload))
+			if err != nil {
+				cancel()
+				return err
+			}
+			for name, value := range headers {
+				req.Header.Set(name, value)
+			}
 			ts := strconv.FormatInt(w.Now().Unix(), 10)
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", "EventCore/0.1")
 			req.Header.Set("X-EventCore-ID", event.ID)
 			req.Header.Set("X-EventCore-Timestamp", ts)
 			req.Header.Set("X-EventCore-Signature", Sign(secret, ts, payload))
 			start := time.Now()
 			resp, sendErr := w.Client.Do(req)
-			attempt.LatencyMS = time.Since(start).Milliseconds()
-			attempt.HTTPStatus = 0
 			if resp != nil {
 				attempt.HTTPStatus = resp.StatusCode
 				io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 				resp.Body.Close()
 			}
-			attempt.Error = ""
-			if sendErr != nil {
+			cancel()
+			attempt.LatencyMS = time.Since(start).Milliseconds()
+			completed := w.Now().UTC()
+			attempt.CompletedAt = &completed
+			permanent := false
+			if sendErr != nil || resp == nil {
 				attempt.Error = "transport failure"
 			} else if attempt.HTTPStatus < 200 || attempt.HTTPStatus >= 300 {
 				attempt.Error = fmt.Sprintf("HTTP %d", attempt.HTTPStatus)
 			}
+			// A blocked redirect can return both a response and a transport error.
+			if attempt.HTTPStatus >= 300 && attempt.HTTPStatus < 500 && attempt.HTTPStatus != 408 && attempt.HTTPStatus != 425 && attempt.HTTPStatus != 429 {
+				permanent = true
+				attempt.Error = fmt.Sprintf("HTTP %d", attempt.HTTPStatus)
+			}
 			if attempt.Error == "" {
 				attempt.Status = "delivered"
+				attempt.Next = time.Time{}
 				if err = w.Store.SaveAttempt(ctx, s.ID, event.ID, attempt); err != nil {
 					return err
 				}
@@ -308,19 +369,26 @@ func (w *Worker) deliver(ctx context.Context, s Subscription) error {
 				continue
 			}
 			attempt.Status = "retry"
-			delay := time.Duration(s.DelaySeconds) * time.Second
-			for n := 1; n < attempt.Count && delay < time.Hour; n++ {
-				delay *= 2
+			attempt.Next = completed.Add(RetryDelay(s.DelaySeconds, attempt.Count))
+			if resp != nil && (attempt.HTTPStatus == 429 || attempt.HTTPStatus == 503) {
+				delay := RetryAfter(resp.Header.Get("Retry-After"), completed)
+				if delay > attempt.Next.Sub(completed) {
+					attempt.Next = completed.Add(delay)
+				}
 			}
-			if delay > time.Hour {
-				delay = time.Hour
+			if permanent || attempt.Count >= s.MaxAttempts {
+				attempt.Status = "failed"
+				attempt.Next = time.Time{}
 			}
-			attempt.Next = w.Now().Add(delay)
 			if err = w.Store.SaveAttempt(ctx, s.ID, event.ID, attempt); err != nil {
 				return err
 			}
 		}
-		if attempt.Count >= s.MaxAttempts {
+
+		if attempt.Count >= s.MaxAttempts || attempt.Status == "failed" {
+			if attempt.Status == "sending" {
+				attempt.Error = "delivery outcome unknown after interruption"
+			}
 			raw, err := json.Marshal(map[string]any{"original_event": event, "original_topic": s.Topic, "original_partition": event.Partition, "original_offset": event.Offset, "subscription_id": s.ID, "error": attempt.Error, "attempts": attempt.Count, "failed_at": w.Now()})
 			if err != nil {
 				return err
