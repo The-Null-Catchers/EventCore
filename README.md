@@ -102,3 +102,5 @@ Read [storage format](docs/STORAGE.md), [acceptance coverage and release gaps](d
 The dashboard, WebSocket group consumers, server-persisted replay jobs, event import, DLQ retry/discard management, richer schema lifecycle, user/password-reset/role-management flows, safe topic deletion, disk-pressure warning UX, OpenTelemetry, full OpenAPI coverage, measured load scenarios and release screenshots/evidence remain open. This is not a complete production release. See the tracked gap list for acceptance work, rather than treating every prompt requirement as implemented.
 
 Future clustering would require persistent broker identity, coordinated partition leadership, follower replication, leader fencing and failover. None of those is simulated here. Redis is intentionally absent because it currently has no authoritative coordination role.
+
+DLQ records support audited admin retry/discard decisions via the public API and both SDKs. Retry republishes to the original topic; discard is logical. Durable outbox recovery and retention pins protect interrupted retry appends. See [API documentation](docs/API.md#dead-letter-decisions) for semantics and backup boundaries.

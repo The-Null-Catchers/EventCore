@@ -95,6 +95,16 @@ class EventCore:
         query = urllib.parse.urlencode({'partition': partition, 'offset': offset, 'limit': limit, **filters})
         return self.request('GET', self.topic_path(topic) + '/events?' + query)
 
+    def dead_letters(self, topic: str, partition: int, offset: int, **filters):
+        query = urllib.parse.urlencode({'partition': partition, 'offset': offset, **filters})
+        return self.request('GET', self.topic_path(topic) + '/dead-letters?' + query)
+
+    def resolve_dead_letter(self, topic: str, partition: int, offset: int, action: str):
+        if action not in ('retry', 'discard'):
+            raise ValueError('action must be retry or discard')
+        return self.request('POST', self.topic_path(topic) + '/dead-letters/' + action,
+                            {'partition': partition, 'offset': offset, 'confirm': True})
+
     def replay(self, topic: str, target: str, replay_id: str, partition: int,
                offset: int, end_offset: int, limit: int = 100, **filters: Any) -> dict:
         """Copy a bounded page, with explicit source snapshot and stable run ID."""

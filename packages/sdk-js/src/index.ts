@@ -6,6 +6,8 @@ export interface Group { epoch: number; offsets: Record<string,number>; lag: Rec
 export interface ScanOptions { partition:number; offset:number; end_offset?:number; limit?:number; from_time?:string; until_time?:string; type?:string; key?:string; id?:string }
 export interface Page { events:Event[]; next_offset:number; end_offset:number; scanned:number; done:boolean }
 export interface ReplayResult { receipts:{source_offset:number;event:Event}[]; next_offset:number; end_offset:number; scanned:number; done:boolean; error?:string }
+export interface DLQDecision { workspace:string; topic:string; partition:number; offset:number; actor:string; action:"retry"|"discard"; status:"pending"|"complete"; created_at:string; completed_at?:string; receipt?:{id:string;topic:string;partition:number;offset:number;timestamp:string} }
+export interface DLQPage { entries:{event:Event;decision?:DLQDecision;error?:string}[]; next_offset:number; end_offset:number; scanned:number; done:boolean }
 export class EventCoreError extends Error { constructor(readonly status:number, message:string, readonly details?:unknown){super(message)} }
 const sleep=(ms:number)=>new Promise<void>(resolve=>setTimeout(resolve,ms));
 export class EventCore {
@@ -37,6 +39,13 @@ export class EventCore {
   }
   replay(topic:string,options:ScanOptions & {end_offset:number;target:string;replay_id:string}):Promise<ReplayResult>{
     return this.request('POST',`${this.topicPath(topic)}/replay`,{...options,confirm:true})
+  }
+  deadLetters(topic:string,options:ScanOptions):Promise<DLQPage>{
+    const query=new URLSearchParams();for(const [key,value] of Object.entries(options)){if(value!==undefined)query.set(key,String(value))}
+    return this.request('GET',`${this.topicPath(topic)}/dead-letters?${query}`)
+  }
+  resolveDeadLetter(topic:string,partition:number,offset:number,action:'retry'|'discard'):Promise<DLQDecision>{
+    return this.request('POST',`${this.topicPath(topic)}/dead-letters/${action}`,{partition,offset,confirm:true})
   }
   join(topic:string,group:string,member:string):Promise<Group>{return this.request('POST',`${this.groupPath(topic,group)}/join`,{member})}
   async pull(topic:string,group:string,member:string,epoch:number,limit=100):Promise<Delivery[]>{

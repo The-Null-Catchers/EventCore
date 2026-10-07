@@ -31,3 +31,8 @@ test('replay failures expose durable prefix without retrying mutation',async()=>
  globalThis.fetch=async()=>{calls++;return Response.json(progress,{status:503})};
  try{await assert.rejects(client.replay('orders',{target:'archive',replay_id:'run',partition:0,offset:5,end_offset:20}),e=>e instanceof EventCoreError&&e.status===503&&e.details.next_offset===6);assert.equal(calls,1)}finally{globalThis.fetch=original}
 });
+test('DLQ resolution does not retry an ambiguous mutation',async()=>{
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(url,options)=>{calls++;assert.ok(url.endsWith('/orders.DLQ/dead-letters/retry'));assert.deepEqual(JSON.parse(options.body),{partition:0,offset:9,confirm:true});throw new Error('connection lost')};
+ try{await assert.rejects(client.resolveDeadLetter('orders.DLQ',0,9,'retry'));assert.equal(calls,1)}finally{globalThis.fetch=original}
+});

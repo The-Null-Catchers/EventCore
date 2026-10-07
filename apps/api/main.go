@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/The-Null-Catchers/EventCore/internal/api"
+	"github.com/The-Null-Catchers/EventCore/internal/deadletters"
 	"github.com/The-Null-Catchers/EventCore/internal/groups"
 	"github.com/The-Null-Catchers/EventCore/internal/metadata"
 	"github.com/The-Null-Catchers/EventCore/internal/storage"
@@ -68,6 +70,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	dlq := &deadletters.Manager{Broker: broker, Store: db}
+	if err := dlq.Recover(ctx); err != nil {
+		return fmt.Errorf("recover DLQ outbox: %w", err)
+	}
 	var webhookWorker *webhooks.Worker
 	if raw := os.Getenv("WEBHOOK_ENCRYPTION_KEY"); raw != "" {
 		key, err := webhooks.ParseKey(raw)
@@ -93,7 +99,7 @@ func run() error {
 			}
 		}()
 	}
-	server := &api.Server{Webhooks: webhookWorker, WebhookAdmin: db, Broker: broker, Groups: coordinator, Auth: db, SecureCookies: secure, Ready: func(ctx context.Context) error {
+	server := &api.Server{DeadLetters: dlq, Webhooks: webhookWorker, WebhookAdmin: db, Broker: broker, Groups: coordinator, Auth: db, SecureCookies: secure, Ready: func(ctx context.Context) error {
 		if err := broker.Check(); err != nil {
 			return err
 		}

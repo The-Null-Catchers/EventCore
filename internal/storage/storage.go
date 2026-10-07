@@ -79,6 +79,7 @@ type partition struct {
 	next     int64
 	poisoned error
 	changed  chan struct{}
+	prepared map[string]int64
 }
 type topicState struct {
 	dedupMu sync.Mutex
@@ -314,6 +315,28 @@ func PartitionFor(key string, n int) int {
 	return int(h.Sum64() % uint64(n))
 }
 func (b *Broker) Publish(w, n string, in Input) (Event, error) {
+	return b.publish(w, n, in, nil, nil)
+}
+
+// PublishPrepared reserves a concrete receipt in durable metadata before append.
+// The callback runs under the partition lock and must not re-enter this broker.
+func (b *Broker) PublishPrepared(w, n string, in Input, prepare func(Event) error) (Event, error) {
+	if prepare == nil || in.IdempotencyKey != "" {
+		return Event{}, errors.New("prepare callback required; producer idempotency key must be empty")
+	}
+	return b.publish(w, n, in, prepare, nil)
+}
+
+// RestorePrepared verifies the reserved offset before finishing an interrupted
+// append. It never appends again if the exact receipt is already present.
+func (b *Broker) RestorePrepared(w string, e Event) (Event, error) {
+	if !ValidName(e.ID) || e.Timestamp.IsZero() || e.IdempotencyKey != "" {
+		return Event{}, errors.New("invalid prepared receipt")
+	}
+	e.Deduplicated = false
+	return b.publish(w, e.Topic, e.Input, nil, &e)
+}
+func (b *Broker) publish(w, n string, in Input, prepare func(Event) error, expected *Event) (Event, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	t, err := b.topic(w, n)
@@ -377,15 +400,13 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 			}
 		}
 	}
-	usage, err := b.disk()
-	if err != nil {
-		return Event{}, fmt.Errorf("%w: capacity check failed", ErrUnavailable)
-	}
-	if usage.AvailableBytes < b.MinFreeBytes || usage.AvailableBytes-b.MinFreeBytes < maxRecord {
-		return Event{}, fmt.Errorf("%w: minimum free disk threshold reached", ErrUnavailable)
-	}
 	idx := 0
-	if in.Key != "" {
+	if expected != nil {
+		idx = expected.Partition
+		if idx < 0 || idx >= len(t.parts) {
+			return Event{}, errors.New("invalid prepared partition")
+		}
+	} else if in.Key != "" {
 		idx = PartitionFor(in.Key, len(t.parts))
 	} else {
 		idx = int((t.rr.Add(1) - 1) % uint64(len(t.parts)))
@@ -396,13 +417,61 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	if p.poisoned != nil {
 		return Event{}, fmt.Errorf("%w: partition requires recovery", ErrUnavailable)
 	}
+	if expected != nil {
+		if expected.Offset < p.segments[0].base || expected.Offset > p.next {
+			return Event{}, fmt.Errorf("%w: prepared offset outside retained log", ErrUnavailable)
+		}
+		if expected.Offset < p.next {
+			events, err := p.read(expected.Offset, 1)
+			if err != nil || len(events) != 1 || events[0].ID != expected.ID {
+				p.poisoned = errors.New("prepared offset contains a different receipt")
+				return Event{}, fmt.Errorf("%w: %v", ErrUnavailable, p.poisoned)
+			}
+			actualHash, actualErr := fingerprint(events[0].Input)
+			expectedHash, expectedErr := fingerprint(expected.Input)
+			if actualErr != nil || expectedErr != nil || actualHash != expectedHash || events[0].Topic != expected.Topic || !events[0].Timestamp.Equal(expected.Timestamp) {
+				p.poisoned = errors.New("prepared receipt content mismatch")
+				return Event{}, fmt.Errorf("%w: %v", ErrUnavailable, p.poisoned)
+			}
+			if p.prepared == nil {
+				p.prepared = map[string]int64{}
+			}
+			p.prepared[expected.ID] = expected.Offset
+			events[0].Deduplicated = true
+			return events[0], nil
+		}
+	}
+	usage, err := b.disk()
+	if err != nil {
+		return Event{}, fmt.Errorf("%w: capacity check failed", ErrUnavailable)
+	}
+	if usage.AvailableBytes < b.MinFreeBytes || usage.AvailableBytes-b.MinFreeBytes < maxRecord {
+		return Event{}, fmt.Errorf("%w: minimum free disk threshold reached", ErrUnavailable)
+	}
 	e := Event{ID: ID(), Topic: n, Partition: idx, Offset: p.next, Timestamp: time.Now().UTC(), Input: in}
+	if expected != nil {
+		e = *expected
+	}
 	payload, err := json.Marshal(e)
 	if err != nil {
 		return Event{}, err
 	}
 	if len(payload) > maxRecord {
 		return Event{}, errors.New("encoded record too large")
+	}
+	if prepare != nil {
+		if err = prepare(e); err != nil {
+			// A failed metadata write may nevertheless have committed remotely.
+			// Fence the reservation until startup recovery resolves that ambiguity.
+			p.poisoned = err
+			return Event{}, fmt.Errorf("%w: prepared metadata write failed; restart required", ErrUnavailable)
+		}
+	}
+	if prepare != nil || expected != nil {
+		if p.prepared == nil {
+			p.prepared = map[string]int64{}
+		}
+		p.prepared[e.ID] = e.Offset
 	}
 	s := &p.segments[len(p.segments)-1]
 	if s.size > 0 && s.size+int64(len(payload)+8) > b.segmentBytes {
@@ -652,6 +721,16 @@ func (b *Broker) Retain(now time.Time) error {
 			}
 			for len(p.segments) > 1 {
 				s := p.segments[0]
+				pinned := false
+				for _, offset := range p.prepared {
+					if offset < s.next {
+						pinned = true
+						break
+					}
+				}
+				if pinned {
+					break
+				}
 				expired := t.config.RetentionSeconds > 0 && now.Sub(s.last) >= time.Duration(t.config.RetentionSeconds)*time.Second
 				oversize := t.config.RetentionBytes > 0 && total > t.config.RetentionBytes/int64(len(t.parts))
 				if !expired && !oversize {
@@ -779,5 +858,23 @@ func (b *Broker) Check() error {
 	if usage.AvailableBytes < b.MinFreeBytes || usage.AvailableBytes-b.MinFreeBytes < maxRecord {
 		return ErrUnavailable
 	}
+	return nil
+}
+
+// CompletePrepared releases the retention pin only after metadata completion.
+func (b *Broker) CompletePrepared(w, n, id string, idx int) error {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	t, err := b.topic(w, n)
+	if err != nil {
+		return err
+	}
+	if idx < 0 || idx >= len(t.parts) {
+		return errors.New("invalid partition")
+	}
+	p := t.parts[idx]
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.prepared, id)
 	return nil
 }

@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -63,6 +64,18 @@ class ClientTests(unittest.TestCase):
                 client.replay('orders', 'archive', 'run', 0, 5, 20)
             self.assertEqual(raised.exception.details['next_offset'], 6)
             self.assertEqual(call.call_count, 1)
+
+    def test_dead_letter_mutation_is_not_retried(self):
+        client = EventCore('https://example.com', 'key')
+        with patch('urllib.request.urlopen', side_effect=OSError('connection lost')) as call:
+            with self.assertRaises(OSError):
+                client.resolve_dead_letter('orders.DLQ', 0, 9, 'retry')
+            self.assertEqual(call.call_count, 1)
+            req = call.call_args.args[0]
+            self.assertTrue(req.full_url.endswith('/dead-letters/retry'))
+            self.assertEqual(json.loads(req.data), {'partition': 0, 'offset': 9, 'confirm': True})
+        with self.assertRaises(ValueError):
+            client.resolve_dead_letter('orders.DLQ', 0, 9, 'delete')
 
 if __name__ == '__main__':
     unittest.main()

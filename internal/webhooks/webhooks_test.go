@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/The-Null-Catchers/EventCore/internal/deadletters"
 	"github.com/The-Null-Catchers/EventCore/internal/groups"
 	"github.com/The-Null-Catchers/EventCore/internal/storage"
 	"io"
@@ -17,6 +18,8 @@ type memory struct {
 	subs     []Subscription
 	attempts map[string]Attempt
 	groups   []groups.State
+	decision deadletters.Decision
+	resolved bool
 }
 
 func (m *memory) Subscriptions(context.Context) ([]Subscription, error) { return m.subs, nil }
@@ -41,6 +44,18 @@ func (m *memory) Save(s groups.State) error {
 	}
 	m.groups = append(m.groups, s)
 	return nil
+}
+
+func (m *memory) DLQDecision(context.Context, string, string, int, int64) (deadletters.Decision, bool, error) {
+	return m.decision, m.resolved, nil
+}
+func (m *memory) SaveDLQDecision(_ context.Context, d deadletters.Decision) error {
+	m.decision = d
+	m.resolved = true
+	return nil
+}
+func (m *memory) NextPendingDLQ(context.Context) (deadletters.Decision, bool, error) {
+	return m.decision, m.resolved && m.decision.Status == "pending", nil
 }
 
 type roundTrip func(*http.Request) (*http.Response, error)
@@ -106,6 +121,28 @@ func TestWebhookRetriesAndDLQ(t *testing.T) {
 	if a := store.attempts[store.subs[0].ID+event.ID]; a.Status != "dlq" || a.HTTPStatus != 500 {
 		t.Fatal(a)
 	}
+	manager := &deadletters.Manager{Broker: b, Store: store}
+	decision, err := manager.Resolve(context.Background(), "demo", "orders.DLQ", "owner", 0, 0, "retry")
+	if err != nil || decision.Receipt.ID == event.ID {
+		t.Fatal(decision, err)
+	}
+	w.Client = &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("ok")), Header: make(http.Header)}, nil
+	})}
+	if err = w.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if a := store.attempts[store.subs[0].ID+decision.Receipt.ID]; a.Status != "delivered" || a.Count != 1 {
+		t.Fatal(a)
+	}
+	if _, err = manager.Resolve(context.Background(), "demo", "orders.DLQ", "owner", 0, 0, "retry"); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 4 {
+		t.Fatal("retry repeated delivery", requests)
+	}
+
 }
 func TestSSRFAndEncryption(t *testing.T) {
 	for _, ip := range []string{"127.0.0.1", "10.1.2.3", "169.254.169.254", "::1", "::ffff:127.0.0.1", "100.100.100.200", "2002:7f00:1::"} {
