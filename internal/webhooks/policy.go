@@ -131,3 +131,6 @@ type HistoryPage struct {
 	NextCursor int64          `json:"next_cursor"`
 	HasMore    bool           `json:"has_more"`
 }
+
+// Metrics counts durable recorded outcomes, not receiver-side unique processing.
+type Metrics struct{ Delivered, Failed, Unknown, DeadLetters uint64 }

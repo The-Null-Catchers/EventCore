@@ -8,7 +8,7 @@ All routes except health/readiness/login require `Authorization: Bearer <api-key
 |---|---|---|---|
 | GET `/health` | none | process status/version | public |
 | GET `/ready` | none | 200 or 503; checks DB and writable storage | public |
-| GET `/metrics` | none | Prometheus text for current workspace | admin |
+| GET `/metrics` | none | Prometheus text for current workspace | admin or metrics:read |
 | POST `/v1/auth/login` | email, password, workspace | CSRF token and HttpOnly cookie | credentials |
 | GET `/v1/auth/me` | none | ID, workspace, role, CSRF token | authenticated |
 | POST `/v1/auth/logout` | none | ok; removes session | session + CSRF |
@@ -132,3 +132,5 @@ def verify(secret, timestamp, signature, raw_body):
                                hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
 ```
+
+Operational metrics and the dedicated `metrics:read` key scope are documented in [METRICS.md](METRICS.md). Broker counters cover actual durable appends rather than only HTTP producer calls; delivery totals include redelivery and are not acknowledgement counts.

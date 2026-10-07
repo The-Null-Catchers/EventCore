@@ -69,6 +69,15 @@ INSERT INTO webhook_delivery_history(subscription_id,event_id,attempt_number,sta
 INSERT INTO schema_migrations(version) VALUES('webhook_history_v1');
 END IF;
 END $$;
+CREATE TABLE IF NOT EXISTS webhook_metrics(workspace_id text PRIMARY KEY REFERENCES workspaces(id),delivered bigint NOT NULL DEFAULT 0,failed bigint NOT NULL DEFAULT 0,unknown bigint NOT NULL DEFAULT 0,dead_letters bigint NOT NULL DEFAULT 0);
+DO $$ BEGIN
+IF NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version='webhook_metrics_v1') THEN
+INSERT INTO webhook_metrics(workspace_id,delivered,failed,unknown,dead_letters)
+SELECT h.workspace_id,count(*) FILTER(WHERE a.status='delivered'),count(*) FILTER(WHERE a.status IN ('retry','failed')),count(*) FILTER(WHERE a.status='unknown'),count(*) FILTER(WHERE a.status='dlq') FROM webhook_delivery_history a JOIN webhooks h ON h.id=a.subscription_id GROUP BY h.workspace_id
+ON CONFLICT(workspace_id) DO NOTHING;
+INSERT INTO schema_migrations(version) VALUES('webhook_metrics_v1');
+END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS dlq_resolutions(workspace_id text REFERENCES workspaces(id),topic text NOT NULL,partition int NOT NULL CHECK(partition>=0),offset_id bigint NOT NULL CHECK(offset_id>=0),decision jsonb NOT NULL,PRIMARY KEY(workspace_id,topic,partition,offset_id));
 CREATE INDEX IF NOT EXISTS dlq_pending ON dlq_resolutions(workspace_id,topic,partition,offset_id) WHERE decision->>'status'='pending';
 CREATE TABLE IF NOT EXISTS audit(id bigserial PRIMARY KEY,workspace_id text NOT NULL,actor text NOT NULL,action text NOT NULL,resource text NOT NULL,ip text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
@@ -264,8 +273,31 @@ func (d *DB) SaveAttempt(ctx context.Context, subscription, event string, a webh
 	if _, err = tx.ExecContext(ctx, `INSERT INTO webhook_attempts(subscription_id,event_id,attempt) VALUES($1,$2,$3) ON CONFLICT(subscription_id,event_id) DO UPDATE SET attempt=EXCLUDED.attempt`, subscription, event, raw); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO webhook_delivery_history(subscription_id,event_id,attempt_number,status,attempt) VALUES($1,$2,$3,$4,$5) ON CONFLICT(subscription_id,event_id,attempt_number,status) DO NOTHING`, subscription, event, a.Count, a.Status, raw); err != nil {
+	history, err := tx.ExecContext(ctx, `INSERT INTO webhook_delivery_history(subscription_id,event_id,attempt_number,status,attempt) VALUES($1,$2,$3,$4,$5) ON CONFLICT(subscription_id,event_id,attempt_number,status) DO NOTHING`, subscription, event, a.Count, a.Status, raw)
+	if err != nil {
 		return err
+	}
+	inserted, err := history.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted == 1 {
+		delivered, failed, unknown, dlq := 0, 0, 0, 0
+		switch a.Status {
+		case "delivered":
+			delivered = 1
+		case "retry", "failed":
+			failed = 1
+		case "unknown":
+			unknown = 1
+		case "dlq":
+			dlq = 1
+		}
+		if delivered+failed+unknown+dlq > 0 {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO webhook_metrics(workspace_id,delivered,failed,unknown,dead_letters) SELECT workspace_id,$2,$3,$4,$5 FROM webhooks WHERE id=$1 ON CONFLICT(workspace_id) DO UPDATE SET delivered=webhook_metrics.delivered+EXCLUDED.delivered,failed=webhook_metrics.failed+EXCLUDED.failed,unknown=webhook_metrics.unknown+EXCLUDED.unknown,dead_letters=webhook_metrics.dead_letters+EXCLUDED.dead_letters`, subscription, delivered, failed, unknown, dlq); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
 }

@@ -20,6 +20,7 @@ The upstream repository was empty on initial inspection. No existing architectur
 | HTTP 500 → bounded retries → durable DLQ → source commit | Webhook integration test using injected HTTP transport |
 | DLQ retry/discard, concurrent resolution, ambiguous prepare, restart recovery and retention pins | Disk/outbox fault tests, HTTP authorization/audit tests, PostgreSQL integration, webhook failure → DLQ → retry → successful delivery |
 | Webhook history atomicity, legacy backfill, cursor paging, encrypted headers, terminal/retry policy and interrupted sends | PostgreSQL rollback/pagination tests, HTTP redaction/scoping tests, worker status/backoff/failure tests |
+| Real append counters, lag/leases/retention loss, workspace metric isolation and durable webhook rollups | Broker/coordinator/API tests plus transactional PostgreSQL history tests |
 | Encryption and SSRF address rules | Webhook security tests |
 | SDK publication does not blindly retry ambiguous failures | JS/Python SDK tests |
 | Bounded timestamp replay, unchanged source, scoped copying and partial-failure retry | Storage/API/SDK tests; Docker acceptance copies 10,001 retained events to archive |
@@ -43,7 +44,7 @@ The local environment does not provide Docker or PostgreSQL. Local unit/integrat
 6. Encrypted custom headers, transactional per-attempt history, terminal 4xx classification and bounded Retry-After handling are implemented. Real external endpoint acceptance and history lifetime quotas remain open.
 7. Add topic update/delete with confirmation and auditing, schema version/lifecycle management and collision rules for user-created `.DLQ` names.
 8. Add user provisioning, role administration, workspace management and password-reset token/email flow. Membership isolation currently works, but owner provisioning is bootstrap-only.
-9. Add disk-pressure warning states, broker version/git SHA/system diagnostics, OpenTelemetry, consumer-lag and delivery Prometheus metrics, and a Prometheus/Grafana deployment profile.
+9. Workspace-scoped broker latency/throughput, group lag/expired-offset/lease metrics and durable webhook counters are implemented, with a least-privilege metrics scope and Prometheus scrape example. Add dashboard warning states, broker version/git SHA/system diagnostics, OpenTelemetry and a Prometheus/Grafana deployment profile.
 10. Add full OpenAPI, measured sustained/burst/slow-consumer load tests, storage growth results, SDK package/release automation, dependency scanning for Go and container images, and reproducible image digest pins.
 11. Run the complete requested 16-step workflow, including a real configured HTTP-500 endpoint and dashboard accuracy checks, then publish release notes/screenshots and tag v0.1.0.
 

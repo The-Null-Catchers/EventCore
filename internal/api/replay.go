@@ -160,9 +160,6 @@ func (s *Server) replay(w http.ResponseWriter, r *http.Request, p metadata.Princ
 			reply(w, replayStatus(e), result)
 			return
 		}
-		if !copied.Deduplicated {
-			s.Published.Add(1)
-		}
 		result.Receipts = append(result.Receipts, replayReceipt{SourceOffset: original.Offset, Event: copied})
 		result.NextOffset = original.Offset + 1
 	}

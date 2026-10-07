@@ -82,6 +82,7 @@ type partition struct {
 	prepared map[string]int64
 }
 type topicState struct {
+	stats   publishStats
 	dedupMu sync.Mutex
 	dedup   dedupIndex
 	schema  *jsonschema.Schema
@@ -337,6 +338,7 @@ func (b *Broker) RestorePrepared(w string, e Event) (Event, error) {
 	return b.publish(w, e.Topic, e.Input, nil, &e)
 }
 func (b *Broker) publish(w, n string, in Input, prepare func(Event) error, expected *Event) (Event, error) {
+	started := time.Now()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	t, err := b.topic(w, n)
@@ -500,6 +502,7 @@ func (b *Broker) publish(w, n string, in Input, prepare func(Event) error, expec
 		p.poisoned = err
 		return Event{}, ErrUnavailable
 	}
+	t.stats.observe(time.Since(started), len(record), isDeadLetter(n, in))
 	p.next++
 	s.next = p.next
 	s.size += int64(len(record))
