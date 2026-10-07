@@ -57,7 +57,18 @@ CREATE TABLE IF NOT EXISTS sessions(token_hash text PRIMARY KEY,user_id text REF
 CREATE TABLE IF NOT EXISTS api_keys(id text PRIMARY KEY,workspace_id text REFERENCES workspaces(id),token_hash text UNIQUE NOT NULL,name text NOT NULL,scopes jsonb NOT NULL,expires_at timestamptz NOT NULL,revoked bool NOT NULL DEFAULT false,last_used_at timestamptz);
 CREATE TABLE IF NOT EXISTS consumer_groups(workspace_id text REFERENCES workspaces(id),topic text NOT NULL,name text NOT NULL,state jsonb NOT NULL,PRIMARY KEY(workspace_id,topic,name));
 CREATE TABLE IF NOT EXISTS webhooks(id text PRIMARY KEY,workspace_id text REFERENCES workspaces(id),topic text NOT NULL,url text NOT NULL,encrypted_secret text NOT NULL,max_attempts int NOT NULL,delay_seconds int NOT NULL,paused bool NOT NULL DEFAULT false);
+ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS encrypted_headers text NOT NULL DEFAULT '';
+ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS header_names jsonb NOT NULL DEFAULT '[]';
 CREATE TABLE IF NOT EXISTS webhook_attempts(subscription_id text REFERENCES webhooks(id),event_id text NOT NULL,attempt jsonb NOT NULL,PRIMARY KEY(subscription_id,event_id));
+CREATE TABLE IF NOT EXISTS webhook_delivery_history(id bigserial PRIMARY KEY,subscription_id text NOT NULL REFERENCES webhooks(id),event_id text NOT NULL,attempt_number int NOT NULL CHECK(attempt_number>0),status text NOT NULL,attempt jsonb NOT NULL,recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(subscription_id,event_id,attempt_number,status));
+CREATE INDEX IF NOT EXISTS webhook_history_cursor ON webhook_delivery_history(subscription_id,id);
+CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now());
+DO $$ BEGIN
+IF NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version='webhook_history_v1') THEN
+INSERT INTO webhook_delivery_history(subscription_id,event_id,attempt_number,status,attempt) SELECT subscription_id,event_id,(attempt->>'attempts')::int,attempt->>'status',attempt FROM webhook_attempts WHERE (attempt->>'attempts')::int>0 ON CONFLICT(subscription_id,event_id,attempt_number,status) DO NOTHING;
+INSERT INTO schema_migrations(version) VALUES('webhook_history_v1');
+END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS dlq_resolutions(workspace_id text REFERENCES workspaces(id),topic text NOT NULL,partition int NOT NULL CHECK(partition>=0),offset_id bigint NOT NULL CHECK(offset_id>=0),decision jsonb NOT NULL,PRIMARY KEY(workspace_id,topic,partition,offset_id));
 CREATE INDEX IF NOT EXISTS dlq_pending ON dlq_resolutions(workspace_id,topic,partition,offset_id) WHERE decision->>'status'='pending';
 CREATE TABLE IF NOT EXISTS audit(id bigserial PRIMARY KEY,workspace_id text NOT NULL,actor text NOT NULL,action text NOT NULL,resource text NOT NULL,ip text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
@@ -182,7 +193,7 @@ func (d *DB) Audit(ctx context.Context, p Principal, action, resource, ip string
 }
 
 func (d *DB) Subscriptions(ctx context.Context) ([]webhooks.Subscription, error) {
-	rows, err := d.SQL.QueryContext(ctx, `SELECT id,workspace_id,topic,url,encrypted_secret,max_attempts,delay_seconds,paused FROM webhooks ORDER BY id LIMIT 1000`)
+	rows, err := d.SQL.QueryContext(ctx, `SELECT id,workspace_id,topic,url,encrypted_secret,max_attempts,delay_seconds,paused,encrypted_headers,header_names FROM webhooks ORDER BY id LIMIT 1000`)
 	if err != nil {
 		return nil, err
 	}
@@ -190,15 +201,27 @@ func (d *DB) Subscriptions(ctx context.Context) ([]webhooks.Subscription, error)
 	out := []webhooks.Subscription{}
 	for rows.Next() {
 		var s webhooks.Subscription
-		if err = rows.Scan(&s.ID, &s.Workspace, &s.Topic, &s.URL, &s.EncryptedSecret, &s.MaxAttempts, &s.DelaySeconds, &s.Paused); err != nil {
+		var names []byte
+		if err = rows.Scan(&s.ID, &s.Workspace, &s.Topic, &s.URL, &s.EncryptedSecret, &s.MaxAttempts, &s.DelaySeconds, &s.Paused, &s.EncryptedHeaders, &names); err != nil {
 			return nil, err
 		}
+		if err = json.Unmarshal(names, &s.HeaderNames); err != nil {
+			return nil, err
+		}
+
 		out = append(out, s)
 	}
 	return out, rows.Err()
 }
 func (d *DB) Create(ctx context.Context, s webhooks.Subscription) error {
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO webhooks VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, s.ID, s.Workspace, s.Topic, s.URL, s.EncryptedSecret, s.MaxAttempts, s.DelaySeconds, s.Paused)
+	names, err := json.Marshal(s.HeaderNames)
+	if err != nil {
+		return err
+	}
+	if s.HeaderNames == nil {
+		names = []byte("[]")
+	}
+	_, err = d.SQL.ExecContext(ctx, `INSERT INTO webhooks(id,workspace_id,topic,url,encrypted_secret,max_attempts,delay_seconds,paused,encrypted_headers,header_names) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, s.ID, s.Workspace, s.Topic, s.URL, s.EncryptedSecret, s.MaxAttempts, s.DelaySeconds, s.Paused, s.EncryptedHeaders, names)
 	return err
 }
 func (d *DB) Attempt(ctx context.Context, subscription, event string) (webhooks.Attempt, error) {
@@ -214,13 +237,37 @@ func (d *DB) Attempt(ctx context.Context, subscription, event string) (webhooks.
 	err = json.Unmarshal(raw, &a)
 	return a, err
 }
+
+// SaveAttempt atomically updates the delivery state and records an immutable
+// transition. Serialize per subscription so a cursor never skips a late commit.
 func (d *DB) SaveAttempt(ctx context.Context, subscription, event string, a webhooks.Attempt) error {
+	if a.Count < 1 {
+		return errors.New("attempt number must be positive")
+	}
+	switch a.Status {
+	case "sending", "retry", "failed", "delivered", "dlq", "unknown":
+	default:
+		return errors.New("invalid attempt status")
+	}
 	raw, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
-	_, err = d.SQL.ExecContext(ctx, `INSERT INTO webhook_attempts VALUES($1,$2,$3) ON CONFLICT(subscription_id,event_id) DO UPDATE SET attempt=EXCLUDED.attempt`, subscription, event, raw)
-	return err
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,761324100))`, subscription); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO webhook_attempts(subscription_id,event_id,attempt) VALUES($1,$2,$3) ON CONFLICT(subscription_id,event_id) DO UPDATE SET attempt=EXCLUDED.attempt`, subscription, event, raw); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO webhook_delivery_history(subscription_id,event_id,attempt_number,status,attempt) VALUES($1,$2,$3,$4,$5) ON CONFLICT(subscription_id,event_id,attempt_number,status) DO NOTHING`, subscription, event, a.Count, a.Status, raw); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (d *DB) Pause(ctx context.Context, w, id string, paused bool) error {
 	result, err := d.SQL.ExecContext(ctx, `UPDATE webhooks SET paused=$3 WHERE workspace_id=$1 AND id=$2`, w, id, paused)

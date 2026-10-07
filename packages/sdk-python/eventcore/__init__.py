@@ -95,6 +95,11 @@ class EventCore:
         query = urllib.parse.urlencode({'partition': partition, 'offset': offset, 'limit': limit, **filters})
         return self.request('GET', self.topic_path(topic) + '/events?' + query)
 
+    def webhook_history(self, subscription_id: str, after: int = 0, limit: int = 50) -> dict:
+        query = urllib.parse.urlencode({'after': after, 'limit': limit})
+        return self.request('GET', '/v1/webhooks/' + urllib.parse.quote(subscription_id, safe='')
+                            + '/history?' + query)
+
     def dead_letters(self, topic: str, partition: int, offset: int, **filters):
         query = urllib.parse.urlencode({'partition': partition, 'offset': offset, **filters})
         return self.request('GET', self.topic_path(topic) + '/dead-letters?' + query)

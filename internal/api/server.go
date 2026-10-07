@@ -33,6 +33,7 @@ type Auth interface {
 type WebhookAdmin interface {
 	Pause(context.Context, string, string, bool) error
 	DeliveryLogs(context.Context, string, string) ([]map[string]any, error)
+	DeliveryHistory(context.Context, string, string, int64, int) (webhooks.HistoryPage, error)
 }
 type bucket struct {
 	start time.Time
@@ -311,6 +312,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			for _, sub := range subs {
 				if sub.Workspace == p.Workspace {
 					sub.Secret = ""
+					sub.Headers = nil
 					out = append(out, sub)
 				}
 			}
@@ -328,7 +330,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := s.Webhooks.Initialize(r.Context(), sub); err != nil {
-				fail(w, 400, err)
+				status := 400
+				if errors.Is(err, webhooks.ErrStore) || errors.Is(err, storage.ErrUnavailable) || errors.Is(err, storage.ErrClosed) {
+					status = 503
+				}
+				fail(w, status, err)
 				return
 			}
 			reply(w, 201, map[string]bool{"ok": true})
@@ -350,6 +356,36 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			reply(w, 200, map[string]bool{"ok": true})
+			return
+		}
+		if len(segments) == 4 && segments[3] == "history" && r.Method == "GET" {
+			if s.WebhookAdmin == nil {
+				fail(w, 503, errors.New("webhook administration unavailable"))
+				return
+			}
+			after := int64(0)
+			limit := 50
+			var err error
+			if v := r.URL.Query().Get("after"); v != "" {
+				after, err = strconv.ParseInt(v, 10, 64)
+				if err != nil || after < 0 {
+					fail(w, 400, errors.New("invalid after cursor"))
+					return
+				}
+			}
+			if v := r.URL.Query().Get("limit"); v != "" {
+				limit, err = strconv.Atoi(v)
+				if err != nil || limit < 1 || limit > 100 {
+					fail(w, 400, errors.New("limit must be 1..100"))
+					return
+				}
+			}
+			page, err := s.WebhookAdmin.DeliveryHistory(r.Context(), p.Workspace, segments[2], after, limit)
+			if err != nil {
+				s.internal(w, err)
+				return
+			}
+			reply(w, 200, page)
 			return
 		}
 		if len(segments) == 4 && segments[3] == "attempts" && r.Method == "GET" {

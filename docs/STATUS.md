@@ -19,6 +19,7 @@ The upstream repository was empty on initial inspection. No existing architectur
 | Optional schema persists and blocks invalid data/external refs | Broker schema test |
 | HTTP 500 → bounded retries → durable DLQ → source commit | Webhook integration test using injected HTTP transport |
 | DLQ retry/discard, concurrent resolution, ambiguous prepare, restart recovery and retention pins | Disk/outbox fault tests, HTTP authorization/audit tests, PostgreSQL integration, webhook failure → DLQ → retry → successful delivery |
+| Webhook history atomicity, legacy backfill, cursor paging, encrypted headers, terminal/retry policy and interrupted sends | PostgreSQL rollback/pagination tests, HTTP redaction/scoping tests, worker status/backoff/failure tests |
 | Encryption and SSRF address rules | Webhook security tests |
 | SDK publication does not blindly retry ambiguous failures | JS/Python SDK tests |
 | Bounded timestamp replay, unchanged source, scoped copying and partial-failure retry | Storage/API/SDK tests; Docker acceptance copies 10,001 retained events to archive |
@@ -39,7 +40,7 @@ The local environment does not provide Docker or PostgreSQL. Local unit/integrat
 3. Explicit fenced processed-prefix commits are implemented alongside batch ack, with no automatic commit. Verify the new exact SHA in CI before release.
 4. Bounded timestamp/range cursor replay, replay-to-topic and JSONL page export are implemented. Durable DLQ retry/discard decisions are implemented. Server-persisted replay jobs and import remain open.
 5. Add WebSocket consumers and JS/Python asynchronous transport parity, with connection recovery tests.
-6. Add webhook custom-header support, per-attempt historical rows (currently the latest state per event), real external endpoint testing, and terminal 4xx classification. Current retries remain bounded.
+6. Encrypted custom headers, transactional per-attempt history, terminal 4xx classification and bounded Retry-After handling are implemented. Real external endpoint acceptance and history lifetime quotas remain open.
 7. Add topic update/delete with confirmation and auditing, schema version/lifecycle management and collision rules for user-created `.DLQ` names.
 8. Add user provisioning, role administration, workspace management and password-reset token/email flow. Membership isolation currently works, but owner provisioning is bootstrap-only.
 9. Add disk-pressure warning states, broker version/git SHA/system diagnostics, OpenTelemetry, consumer-lag and delivery Prometheus metrics, and a Prometheus/Grafana deployment profile.

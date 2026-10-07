@@ -32,10 +32,11 @@ All routes except health/readiness/login require `Authorization: Bearer <api-key
 | POST `/v1/topics/{topic}/groups/{group}/commit` | member, epoch, partition, token, next_offset | ok; commits a processed prefix, releases lease | consume |
 | POST `/v1/topics/{topic}/groups/{group}/nack` | same as ack | ok; leaves committed offset unchanged | consume |
 | POST `/v1/topics/{topic}/groups/{group}/reset` | partition, offset, confirm:true | ok; rejects live members | admin |
-| POST `/v1/webhooks` | topic, url, secret (>=32 chars), max_attempts (1..20), delay_seconds (1..3600), paused? | 201 ok; list to retrieve generated ID | admin |
-| GET `/v1/webhooks` | none | subscriptions in workspace; secrets omitted | admin |
+| POST `/v1/webhooks` | topic, url, secret (32..1024 bytes), headers? (encrypted), max_attempts (1..20), delay_seconds (1..3600), paused? | 201 ok; list to retrieve generated ID | admin |
+| GET `/v1/webhooks` | none | subscriptions in workspace; secret/header values omitted, header_names included | admin |
 | PATCH `/v1/webhooks/{id}` | paused | ok | admin |
 | GET `/v1/webhooks/{id}/attempts` | none | at most100 latest per-event attempt states | admin |
+| GET `/v1/webhooks/{id}/history` | after? (exclusive cursor, default0), limit? (1..100, default50) | entries, next_cursor, has_more; immutable delivery transitions | admin |
 
 ## Publish
 
@@ -104,3 +105,30 @@ Python: `client.scan(topic, partition, offset, end_offset=..., from_time=...)` a
 Retry publishes the original type/key/data/headers to its original topic through normal schema/size validation, with a new ID/timestamp and `eventcore.dlq.*` provenance headers. All consumers of that topic can see it, including other webhooks; this is not a targeted webhook redelivery. Discard records a logical decision and preserves the append-only DLQ record until retention. Invalid/non-webhook DLQ envelopes return 400; unavailable metadata/storage returns 503; expired cursors return 416.
 
 A pending PostgreSQL outbox row reserves the new partition offset before the broker append. An ambiguous prepare fences the partition until restart. Startup verifies/replays pending reservations before serving traffic or running workers/retention. Pending receipts pin retention; completion removes the stored candidate payload and releases the pin. This mechanism is independent of the bounded producer-idempotency cache. Keep broker data and metadata backups consistent: a missing/conflicting reserved record stops recovery rather than silently duplicating it. Decision history currently has no automatic cleanup.
+
+
+## Webhook delivery policy and history
+
+Subscriptions accept optional `headers`, for example `{"Authorization":"Bearer receiver-token","X-Client":"billing"}`. Names are validated HTTP tokens and normalized case-insensitively; duplicate names, CR/LF/non-ASCII values, routing/hop-by-hop headers, `X-Forwarded-*` and `X-EventCore-*` are rejected. Limits: 16 headers, 64-byte names, 1024-byte values, 8 KiB combined. Content-Type, User-Agent and signature fields are platform-controlled. Header values are AES-GCM encrypted with separate authenticated context from signing secrets; GET subscriptions exposes only their names. Put credentials in headers rather than URL query parameters.
+
+Each delivery has a 10-second timeout and bounded response-body drain. HTTP 2xx is success. Redirects and permanent 4xx (except 408, 425 and 429) go to DLQ immediately. Network errors, 408/425/429 and 5xx retry with exponential delay up to one hour and the configured attempt limit. For 429/503, `Retry-After` seconds or HTTP dates can extend the delay, capped at one hour. Attempts and source ordering remain at least once.
+
+`history` contains immutable `sending` and outcome transitions per attempt number, plus `dlq` routing. A recovered incomplete send records `unknown`: the receiver may have processed it, or the request may never have left the broker. `started_at`, `completed_at`, HTTP status, latency and sanitized diagnostics describe known outcomes; bodies, URL-derived errors and header values are never stored in history. The latest state and history transition commit together. Per-subscription SQL serialization makes cursor pagination safe from late lower-cursor commits. Repeat the cursor from `next_cursor`; `has_more=false` means no more rows at query time, and later requests can see new transitions. JS `webhookHistory(id, after, limit)` and Python `webhook_history(id, after, limit)` use this endpoint. The older `attempts` response shape stays unchanged.
+
+On upgrade, the previously available latest state is seeded once into history. Earlier attempts cannot be reconstructed and are not invented; legacy entries may lack delivery timestamps. History currently has no automatic expiry or lifetime quota. Worker/configuration/metadata errors surface to operational logs and the caller; secrets and response bodies remain excluded.
+
+Verify incoming webhook signatures over the **raw request bytes** before decoding JSON, using a constant-time comparison. Reject stale timestamps (for example, more than 5 minutes away), keep clocks synchronized, and deduplicate `X-EventCore-ID` in your application because valid requests can be retried:
+
+```python
+import hashlib, hmac, time
+
+def verify(secret, timestamp, signature, raw_body):
+    try:
+        if abs(time.time() - int(timestamp)) > 300:
+            return False
+    except (ValueError, TypeError):
+        return False
+    expected = 'v1=' + hmac.new(secret.encode(), timestamp.encode() + b'.' + raw_body,
+                               hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+```
