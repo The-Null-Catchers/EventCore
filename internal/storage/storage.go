@@ -34,17 +34,19 @@ var ErrClosed = errors.New("broker closed")
 var ErrUnavailable = errors.New("broker storage unavailable")
 
 type Input struct {
-	Type    string            `json:"type"`
-	Key     string            `json:"key,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Data    json.RawMessage   `json:"data"`
+	IdempotencyKey string            `json:"idempotency_key,omitempty"`
+	Type           string            `json:"type"`
+	Key            string            `json:"key,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Data           json.RawMessage   `json:"data"`
 }
 type Event struct {
-	ID        string    `json:"id"`
-	Topic     string    `json:"topic"`
-	Partition int       `json:"partition"`
-	Offset    int64     `json:"offset"`
-	Timestamp time.Time `json:"timestamp"`
+	Deduplicated bool      `json:"deduplicated,omitempty"`
+	ID           string    `json:"id"`
+	Topic        string    `json:"topic"`
+	Partition    int       `json:"partition"`
+	Offset       int64     `json:"offset"`
+	Timestamp    time.Time `json:"timestamp"`
 	Input
 }
 type Topic struct {
@@ -79,10 +81,12 @@ type partition struct {
 	changed  chan struct{}
 }
 type topicState struct {
-	schema *jsonschema.Schema
-	config Topic
-	parts  []*partition
-	rr     atomic.Uint64
+	dedupMu sync.Mutex
+	dedup   dedupIndex
+	schema  *jsonschema.Schema
+	config  Topic
+	parts   []*partition
+	rr      atomic.Uint64
 }
 type Broker struct {
 	MinFreeBytes int64
@@ -212,7 +216,12 @@ func (b *Broker) openTopic(c Topic) (*topicState, error) {
 	}
 
 	for i := 0; i < c.Partitions; i++ {
-		p, err := openPartition(filepath.Join(b.root, "topics", c.Workspace, c.Name, strconv.Itoa(i)))
+		p, err := openPartition(filepath.Join(b.root, "topics", c.Workspace, c.Name, strconv.Itoa(i)), func(e Event) error {
+			if e.Topic != c.Name || e.Partition != i {
+				return errors.New("record topic/partition mismatch")
+			}
+			return t.dedup.remember(e, time.Now())
+		})
 		if err != nil {
 			for _, old := range t.parts {
 				old.file.Close()
@@ -311,14 +320,7 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	if err != nil {
 		return Event{}, err
 	}
-	usage, err := b.disk()
-	if err != nil {
-		return Event{}, fmt.Errorf("%w: capacity check failed", ErrUnavailable)
-	}
-	if usage.AvailableBytes < b.MinFreeBytes || usage.AvailableBytes-b.MinFreeBytes < maxRecord {
-		return Event{}, fmt.Errorf("%w: minimum free disk threshold reached", ErrUnavailable)
-	}
-	if in.Type == "" || len(in.Type) > 256 || !json.Valid(in.Data) || len(in.Key) > 4096 || len(in.Headers) > 64 {
+	if in.Type == "" || len(in.Type) > 256 || !json.Valid(in.Data) || len(in.Key) > 4096 || len(in.Headers) > 64 || len(in.IdempotencyKey) > 256 {
 		return Event{}, errors.New("invalid event envelope")
 	}
 	if t.schema != nil {
@@ -336,6 +338,51 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	}
 	if len(raw) > t.config.MaxEventBytes {
 		return Event{}, errors.New("event exceeds topic maximum")
+	}
+	if in.IdempotencyKey != "" {
+		// Serializes keyed requests across partitions: one key is scoped to the
+		// workspace/topic, including unkeyed round-robin publications.
+		t.dedupMu.Lock()
+		defer t.dedupMu.Unlock()
+		t.dedup.prune(time.Now())
+		if previous := t.dedup.byKey[in.IdempotencyKey]; previous != nil {
+			p := t.parts[previous.partition]
+			p.mu.Lock()
+			if p.poisoned != nil {
+				p.mu.Unlock()
+				return Event{}, ErrUnavailable
+			}
+			if previous.offset < p.segments[0].base {
+				t.dedup.remove(previous)
+				p.mu.Unlock()
+			} else {
+				hash, err := fingerprint(in)
+				if err != nil {
+					p.mu.Unlock()
+					return Event{}, err
+				}
+				if hash != previous.hash {
+					p.mu.Unlock()
+					return Event{}, ErrIdempotencyConflict
+				}
+				events, err := p.read(previous.offset, 1)
+				if err != nil || len(events) != 1 || events[0].ID != previous.id {
+					p.poisoned = errors.New("idempotency receipt unavailable")
+					p.mu.Unlock()
+					return Event{}, fmt.Errorf("%w: idempotency receipt unavailable", ErrUnavailable)
+				}
+				p.mu.Unlock()
+				events[0].Deduplicated = true
+				return events[0], nil
+			}
+		}
+	}
+	usage, err := b.disk()
+	if err != nil {
+		return Event{}, fmt.Errorf("%w: capacity check failed", ErrUnavailable)
+	}
+	if usage.AvailableBytes < b.MinFreeBytes || usage.AvailableBytes-b.MinFreeBytes < maxRecord {
+		return Event{}, fmt.Errorf("%w: minimum free disk threshold reached", ErrUnavailable)
 	}
 	idx := 0
 	if in.Key != "" {
@@ -380,6 +427,10 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 		p.poisoned = err
 		return Event{}, fmt.Errorf("%w: append/fsync failed; partition fenced until recovery", ErrUnavailable)
 	}
+	if err = t.dedupRemember(e); err != nil {
+		p.poisoned = err
+		return Event{}, ErrUnavailable
+	}
 	p.next++
 	s.next = p.next
 	s.size += int64(len(record))
@@ -388,7 +439,13 @@ func (b *Broker) Publish(w, n string, in Input) (Event, error) {
 	p.changed = make(chan struct{})
 	return e, nil
 }
-func openPartition(dir string) (*partition, error) {
+func (t *topicState) dedupRemember(e Event) error {
+	if e.IdempotencyKey == "" {
+		return nil
+	}
+	return t.dedup.remember(e, time.Now())
+}
+func openPartition(dir string, recoverEvent func(Event) error) (*partition, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -441,6 +498,10 @@ func openPartition(dir string) (*partition, error) {
 			if e.Offset != s.next {
 				f.Close()
 				return nil, errors.New("noncontiguous offsets")
+			}
+			if err = recoverEvent(e); err != nil {
+				f.Close()
+				return nil, err
 			}
 			s.next++
 			s.last = e.Timestamp
@@ -534,6 +595,11 @@ func (b *Broker) Read(w, n string, idx int, offset int64, limit int) ([]Event, e
 	p := t.parts[idx]
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.read(offset, limit)
+}
+
+// read requires the partition mutex; reads at most one bounded page from disk.
+func (p *partition) read(offset int64, limit int) ([]Event, error) {
 	if offset < p.segments[0].base || offset > p.next {
 		return nil, ErrRange
 	}

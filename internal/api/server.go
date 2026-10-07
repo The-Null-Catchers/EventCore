@@ -465,9 +465,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		for _, in := range req.Events {
 			event, err := s.Broker.Publish(p.Workspace, topic, in)
 			if err != nil {
-				results = append(results, map[string]any{"error": err.Error()})
+				status := 400
+				if errors.Is(err, storage.ErrIdempotencyConflict) {
+					status = 409
+				}
+				if errors.Is(err, storage.ErrUnavailable) {
+					status = 503
+				}
+				results = append(results, map[string]any{"error": err.Error(), "status": status})
 			} else {
-				s.Published.Add(1)
+				if !event.Deduplicated {
+					s.Published.Add(1)
+				}
 				results = append(results, map[string]any{"event": event})
 			}
 		}
@@ -485,12 +494,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				if errors.Is(err, storage.ErrUnavailable) {
 					s.internal(w, err)
+				} else if errors.Is(err, storage.ErrIdempotencyConflict) {
+					fail(w, 409, err)
 				} else {
 					fail(w, 400, err)
 				}
 				return
 			}
-			s.Published.Add(1)
+			if !event.Deduplicated {
+				s.Published.Add(1)
+			}
 			reply(w, 201, event)
 			return
 		}

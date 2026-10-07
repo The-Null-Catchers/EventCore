@@ -244,7 +244,9 @@ func TestCrashRecoverySubprocess(t *testing.T) {
 		if err = b.Create(Topic{Workspace: "demo", Name: "orders", Partitions: 1}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = b.Publish("demo", "orders", input("same")); err != nil {
+		in := input("same")
+		in.IdempotencyKey = "crash-request"
+		if _, err = b.Publish("demo", "orders", in); err != nil {
 			t.Fatal(err)
 		}
 		fmt.Println("DURABLE")
@@ -281,6 +283,12 @@ func TestCrashRecoverySubprocess(t *testing.T) {
 	events, err := broker.Read("demo", "orders", 0, 0, 10)
 	if err != nil || len(events) != 1 || events[0].Offset != 0 {
 		t.Fatal(events, err)
+	}
+	retry := input("same")
+	retry.IdempotencyKey = "crash-request"
+	duplicate, err := broker.Publish("demo", "orders", retry)
+	if err != nil || !duplicate.Deduplicated || duplicate.ID != events[0].ID {
+		t.Fatal(duplicate, err)
 	}
 	next, err := broker.Publish("demo", "orders", input("same"))
 	if err != nil || next.Offset != 1 {

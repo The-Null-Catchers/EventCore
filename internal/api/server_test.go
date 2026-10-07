@@ -231,3 +231,45 @@ func TestManualCommitAPI(t *testing.T) {
 		t.Fatal(state)
 	}
 }
+
+func TestIdempotentPublishAPI(t *testing.T) {
+	h, _ := apiFixture(t)
+	path := "/v1/topics/orders/events"
+	payload := `{"type":"order.created","idempotency_key":"request","data":{"amount":42}}`
+	first := request(h, "POST", path, "produce", payload)
+	second := request(h, "POST", path, "produce", payload)
+	var original, retry storage.Event
+	json.Unmarshal(first.Body.Bytes(), &original)
+	json.Unmarshal(second.Body.Bytes(), &retry)
+	if first.Code != 201 || second.Code != 201 || original.ID != retry.ID || !retry.Deduplicated {
+		t.Fatal(first.Code, second.Code, second.Body)
+	}
+	conflict := request(h, "POST", path, "produce", `{"type":"order.created","idempotency_key":"request","data":{"amount":43}}`)
+	if conflict.Code != 409 {
+		t.Fatal(conflict.Code, conflict.Body)
+	}
+	for _, token := range []string{"", "consume"} {
+		denied := request(h, "POST", path, token, payload)
+		if denied.Code != 401 && denied.Code != 403 {
+			t.Fatal(denied.Code, denied.Body)
+		}
+	}
+	batch := request(h, "POST", path+"/batch", "produce", `{"events":[{"type":"order.created","idempotency_key":"request","data":{"amount":42}},{"type":"changed","idempotency_key":"request","data":{}},{"type":"new","idempotency_key":"second","data":{}}]}`)
+	var result struct {
+		Results []struct {
+			Event  *storage.Event
+			Error  string
+			Status int
+		}
+	}
+	if err := json.Unmarshal(batch.Body.Bytes(), &result); err != nil || batch.Code != 200 || len(result.Results) != 3 {
+		t.Fatal(batch.Code, batch.Body, err)
+	}
+	if result.Results[0].Event == nil || !result.Results[0].Event.Deduplicated || result.Results[1].Status != 409 || result.Results[2].Event == nil {
+		t.Fatal(result)
+	}
+	metrics := request(h, "GET", "/metrics", "admin", "")
+	if !strings.Contains(metrics.Body.String(), "events_published_total 2\n") {
+		t.Fatal("duplicates inflated metrics", metrics.Body)
+	}
+}

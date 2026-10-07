@@ -64,7 +64,7 @@ if phase == 'before':
     ids = set()
     for start in range(0, 10000, 100):
         results = client.publish_batch('orders', [
-            {'type': 'order.created', 'key': 'customer_' + str(i % 500), 'data': {'sequence': i}}
+            {'type': 'order.created', 'key': 'customer_' + str(i % 500), 'data': {'sequence': i}, **({'idempotency_key': 'order-9999'} if i == 9999 else {})}
             for i in range(start, start + 100)])
         assert len(results) == 100
         for result in results:
@@ -78,6 +78,15 @@ if phase == 'before':
             last_key[event['key']] = (partition, event['offset'])
             ids.add(event['id'])
     assert len(ids) == 10000
+    retry = client.publish('orders', 'order.created', {'sequence': 9999}, 'customer_499',
+                           idempotency_key='order-9999')
+    assert retry['deduplicated'] and retry['id'] in ids
+    try:
+        client.publish('orders', 'order.created', {'sequence': -1}, 'customer_499',
+                       idempotency_key='order-9999')
+        raise AssertionError('conflicting key reused')
+    except EventCoreError as error:
+        assert error.status == 409
     client.join('orders', 'billing', 'consumer-a')
     both = client.join('orders', 'billing', 'consumer-b')
     assert sum(both['lag'].values()) == 10000
@@ -113,6 +122,9 @@ elif phase == 'after':
     with open(state_path) as f:
         saved = json.load(f)
     client = TestClient(base, saved['token'])
+    retry = client.publish('orders', 'order.created', {'sequence': 9999}, 'customer_499',
+                           idempotency_key='order-9999')
+    assert retry['deduplicated'] and retry['id'] in saved['ids']
     detail = client.request('GET', '/v1/topics/orders')
     assert [p['next_offset'] for p in detail['partitions']] == saved['counts']
     recovered = client.request('GET', '/v1/topics/orders/groups/billing')

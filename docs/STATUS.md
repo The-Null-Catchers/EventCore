@@ -20,6 +20,7 @@ The upstream repository was empty on initial inspection. No existing architectur
 | HTTP 500 → bounded retries → durable DLQ → source commit | Webhook integration test using injected HTTP transport |
 | Encryption and SSRF address rules | Webhook security tests |
 | SDK publication does not blindly retry ambiguous failures | JS/Python SDK tests |
+| Concurrent duplicate publication, conflict detection, bounded index, retention and crash recovery | Disk broker race tests; SIGKILL receipt recovery; scoped API and SDK tests |
 | Real PostgreSQL sessions, keys and committed offsets | Environment-gated test; executed by CI |
 | Docker Compose → 10,000 SDK events → two members → rebalance → restart → replay | Dedicated GitHub Actions acceptance job |
 
@@ -32,7 +33,7 @@ The local environment does not provide Docker or PostgreSQL. Local unit/integrat
 ## Required before tagging v0.1.0
 
 1. Complete and test a professional dashboard against these real APIs. No dashboard screenshots exist yet.
-2. Add producer idempotency with documented recovery and deduplication boundaries.
+2. Durable bounded producer idempotency is implemented, with scope/age/capacity/retention boundaries documented. Exact-SHA external CI evidence remains required before release.
 3. Explicit fenced processed-prefix commits are implemented alongside batch ack, with no automatic commit. Verify the new exact SHA in CI before release.
 4. Add timestamp/range replay sessions and replay-to-topic operations, bounded export/import, and DLQ retry/discard operations.
 5. Add WebSocket consumers and JS/Python asynchronous transport parity, with connection recovery tests.
@@ -46,7 +47,7 @@ The local environment does not provide Docker or PostgreSQL. Local unit/integrat
 ## Operational boundaries
 
 - One broker process, one metadata database, one writable data volume. No clustering, replication or failover.
-- At-least-once group and webhook semantics; no exactly-once or transactional producer guarantee.
+- Bounded producer idempotency (4,096 receipts/topic, 24 hours, retained log lifetime); at-least-once group and webhook semantics; no exactly-once or transactional producer guarantee.
 - SQL commits and file appends are distinct durable boundaries. Publication/HTTP/DLQ uncertainty can cause duplicates.
 - Group assignments use sorted member IDs and partition `id % member_count`; joins/leaves/expiry advance the generation and invalidate in-flight leases. Membership is intentionally ephemeral across broker restart, committed offsets are durable.
 - API request limits are in-process, reset at restart and do not coordinate multiple nodes. Batch requests count as one request; their length and total body size are bounded separately.

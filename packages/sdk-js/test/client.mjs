@@ -15,3 +15,9 @@ test('partial commit carries next offset and surfaces fencing without retry',asy
  };
  try{const [d]=await client.pull('orders','billing','member',7);await assert.rejects(d.commit(10),e=>e instanceof EventCoreError&&e.status===409);assert.equal(commits,1)}finally{globalThis.fetch=original}
 });
+
+test('producer idempotency keys are explicit and response preserves receipt',async()=>{
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(url,options)=>{calls++;assert.equal(JSON.parse(options.body).idempotency_key,'req-123');return Response.json({id:'same',deduplicated:true})};
+ try{const result=await client.publish('orders',{type:'created',data:{},idempotency_key:'req-123'});assert.equal(result.id,'same');assert.equal(result.deduplicated,true);assert.equal(calls,1)}finally{globalThis.fetch=original}
+});

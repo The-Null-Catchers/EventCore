@@ -1,5 +1,5 @@
-export interface EventInput<T=unknown> { type: string; key?: string; headers?: Record<string,string>; data: T }
-export interface Event<T=unknown> extends EventInput<T> { id: string; topic: string; partition: number; offset: number; timestamp: string }
+export interface EventInput<T=unknown> { type: string; idempotency_key?: string; key?: string; headers?: Record<string,string>; data: T }
+export interface Event<T=unknown> extends EventInput<T> { deduplicated?: boolean; id: string; topic: string; partition: number; offset: number; timestamp: string }
 export interface Batch { partition: number; token: string; epoch: number; events: Event[] }
 export interface Delivery extends Batch { ack(): Promise<void>; nack(): Promise<void>; commit(nextOffset: number): Promise<void> }
 export interface Group { epoch: number; offsets: Record<string,number>; lag: Record<string,number>; members: {id:string;partitions:number[]}[] }
@@ -27,7 +27,7 @@ export class EventCore {
   topicPath(topic:string){return `/v1/topics/${encodeURIComponent(topic)}`}
   groupPath(topic:string,group:string){return `${this.topicPath(topic)}/groups/${encodeURIComponent(group)}`}
   publish<T>(topic:string,event:EventInput<T>):Promise<Event<T>>{return this.request('POST',`${this.topicPath(topic)}/events`,event)}
-  async publishBatch(topic:string,events:EventInput[]):Promise<({event:Event}|{error:string})[]>{const response=await this.request<{results:({event:Event}|{error:string})[]}>('POST',`${this.topicPath(topic)}/events/batch`,{events});return response.results}
+  async publishBatch(topic:string,events:EventInput[]):Promise<({event:Event}|{error:string;status?:number})[]>{const response=await this.request<{results:({event:Event}|{error:string;status?:number})[]}>('POST',`${this.topicPath(topic)}/events/batch`,{events});return response.results}
   join(topic:string,group:string,member:string):Promise<Group>{return this.request('POST',`${this.groupPath(topic,group)}/join`,{member})}
   async pull(topic:string,group:string,member:string,epoch:number,limit=100):Promise<Delivery[]>{
     const path=this.groupPath(topic,group);
