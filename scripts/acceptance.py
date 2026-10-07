@@ -139,6 +139,29 @@ elif phase == 'after':
     replayed = drain(client, 'billing', 'replay', joined['epoch'])
     assert replayed == set(saved['ids']) | {event['id']}
     client.request('POST', '/v1/topics/orders/groups/billing/leave', {'member': 'replay'})
+    # Replay selected timestamp-filtered snapshots to another topic through SDK.
+    client.request('POST', '/v1/topics', {'name': 'archive', 'partitions': 4})
+    copied = set()
+    for partition in range(4):
+        snapshot = client.scan('orders', partition, 0, limit=100)
+        end = snapshot['end_offset']
+        cursor = 0
+        while cursor < end:
+            result = client.replay('orders', 'archive', 'acceptance-replay', partition,
+                                   cursor, end, from_time='2000-01-01T00:00:00Z')
+            copied.update(receipt['event']['headers']['eventcore.replay.source_id']
+                          for receipt in result['receipts'])
+            assert result['next_offset'] > cursor
+            cursor = result['next_offset']
+    assert copied == replayed
+    # A page retried within the bounded receipt window must not append again.
+    archive_before = client.request('GET', '/v1/topics/archive')['partitions']
+    end = client.scan('orders', 3, 0)['end_offset']
+    retry = client.replay('orders', 'archive', 'acceptance-replay', 3, max(0, end-10), end,
+                          from_time='2000-01-01T00:00:00Z')
+    assert all(receipt['event']['deduplicated'] for receipt in retry['receipts'])
+    assert client.request('GET', '/v1/topics/archive')['partitions'] == archive_before
+    print('PASS: timestamp-filtered replay copied all 10,001 events to archive; retried page deduplicated')
     print('PASS: broker restart preserved all events and commits, offsets continued, reset and replay of 10,001 events')
 else:
     raise SystemExit('expected before or after')
