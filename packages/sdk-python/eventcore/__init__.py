@@ -79,9 +79,9 @@ class EventCore:
     def group_path(cls, topic: str, group: str) -> str:
         return cls.topic_path(topic) + '/groups/' + urllib.parse.quote(group, safe='')
 
-    def publish(self, topic: str, event_type: str, data: Any, key: str = '', headers: dict | None = None) -> dict:
+    def publish(self, topic: str, event_type: str, data: Any, key: str = '', headers: dict | None = None, idempotency_key: str = '') -> dict:
         return self.request('POST', self.topic_path(topic) + '/events',
-                            {'type': event_type, 'key': key, 'data': data, 'headers': headers or {}})
+                            {'type': event_type, 'key': key, 'data': data, 'headers': headers or {}, 'idempotency_key': idempotency_key})
 
     def publish_batch(self, topic: str, events: list[dict]) -> list[dict]:
         """Each result contains event OR error. Batches are ordered, non-atomic."""

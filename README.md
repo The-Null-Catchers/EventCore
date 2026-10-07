@@ -10,7 +10,7 @@ EventCore is intended for self-hosted event-driven services, IoT ingestion and r
 - Keyed FNV-1a 64-bit partition assignment; unkeyed round-robin routing.
 - Ordered per-partition offsets, length-prefixed CRC32 records, segment rotation and fsync-before-ack.
 - Exclusive process lock on the data directory, restart recovery, repair of an incomplete active tail and refusal of complete-record corruption.
-- Single and bounded, non-atomic batch publication; optional JSON Schema 2020-12 validation on event `data`. External schema references are prohibited.
+- Single and bounded, non-atomic batch publication; durable bounded producer idempotency; optional JSON Schema 2020-12 validation on event `data`. External schema references are prohibited.
 - Fenced consumer groups, deterministic partition assignment, membership expiry, batch acknowledgments, explicit processed-prefix commits, nack/redelivery, visibility leases and durable next-offset commits.
 - Safe group resets when no members are active; replay by resetting offsets or reading immutable retained ranges.
 - Time/size retention of sealed segments and explicit HTTP 416 for offsets that have been removed.
@@ -68,14 +68,14 @@ python -m pip install -e packages/sdk-python
 export EVENTCORE_URL=http://localhost:8080
 export EVENTCORE_API_KEY='your-created-key'
 eventcore topics create orders --partitions 4
-eventcore publish orders --type order.created --key customer_123 --data '{"order_id":"123"}'
+eventcore publish orders --type order.created --key customer_123 --idempotency-key checkout-123 --data '{"order_id":"123"}'
 ```
 
 Use an admin key to create topics and groups; give application producers only `topic:orders:produce`, and consumers `topic:orders:consume`. `topic:orders:read` permits retained-range inspection and SSE. Dashboard browser credentials belong in cookies, never localStorage.
 
 ## Delivery guarantees
 
-Durable acknowledgment means the append completed and `fsync` returned successfully on the configured filesystem. Actual power-loss durability depends on the filesystem, host and disk honoring synchronization. Publication failures after a write may be ambiguous; producer idempotency is not implemented and the SDKs never retry publication automatically.
+Durable acknowledgment means the append completed and `fsync` returned successfully on the configured filesystem. Actual power-loss durability depends on the filesystem, host and disk honoring synchronization. Publication failures after a write may be ambiguous; the SDKs never retry publication automatically. Supply `idempotency_key` to explicitly retry the same event safely while its receipt is retained: the broker returns the original receipt with `deduplicated:true` and rejects changed content with HTTP 409. Deduplication is scoped to workspace/topic and bounded to the newest 4,096 idempotent event receipts per topic, 24 hours, and the event’s retained lifetime. Receipts are reconstructed from the checksummed log after restart. After any boundary expires, a retry can append again. See [API details](docs/API.md).
 
 Group offsets mean **the next event to process**. `next_offset=100` and `committed=70` gives `lag=30`. A batch ack commits all events in that partition batch, so applications must finish the entire batch first. For partial processing, call the delivery’s `commit(next_offset)` (Python) or `commit(nextOffset)` (JS). This saves only the processed prefix, releases the lease and redelivers the suffix with a new token on the next pull. A nack or expired visibility lease causes redelivery. Ownership changes invalidate outstanding tokens and generations; clients must rejoin on HTTP 409. Processed side effects may repeat during crashes or rebalances. Applications should use event IDs for sink deduplication.
 
@@ -99,6 +99,6 @@ Read [storage format](docs/STORAGE.md), [acceptance coverage and release gaps](d
 
 ## Before v0.1.0
 
-The dashboard, WebSocket group consumers, timestamp/range replay sessions, replay to another topic, DLQ retry/discard management, producer idempotency, richer schema lifecycle, user/password-reset/role-management flows, safe topic deletion, disk-pressure warning UX, OpenTelemetry, full OpenAPI coverage, measured load scenarios and release screenshots/evidence remain open. This is not a complete production release. See the tracked gap list for acceptance work, rather than treating every prompt requirement as implemented.
+The dashboard, WebSocket group consumers, timestamp/range replay sessions, replay to another topic, DLQ retry/discard management, richer schema lifecycle, user/password-reset/role-management flows, safe topic deletion, disk-pressure warning UX, OpenTelemetry, full OpenAPI coverage, measured load scenarios and release screenshots/evidence remain open. This is not a complete production release. See the tracked gap list for acceptance work, rather than treating every prompt requirement as implemented.
 
 Future clustering would require persistent broker identity, coordinated partition leadership, follower replication, leader fencing and failover. None of those is simulated here. Redis is intentionally absent because it currently has no authoritative coordination role.

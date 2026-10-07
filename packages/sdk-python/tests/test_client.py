@@ -34,5 +34,13 @@ class ClientTests(unittest.TestCase):
                              {'member': 'a', 'epoch': 4, 'partition': 0, 'token': 'lease', 'next_offset': 3})
             self.assertTrue(req.full_url.endswith('/commit'))
 
+    def test_publish_passes_idempotency_key_without_retries(self):
+        client = EventCore('https://example.com', 'key')
+        with patch.object(client, 'request', return_value={'id': 'same', 'deduplicated': True}) as call:
+            event = client.publish('orders', 'created', {'order': '123'}, idempotency_key='req-123')
+            self.assertTrue(event['deduplicated'])
+            self.assertEqual(call.call_count, 1)
+            self.assertEqual(call.call_args.args[2]['idempotency_key'], 'req-123')
+
 if __name__ == '__main__':
     unittest.main()

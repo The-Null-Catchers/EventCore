@@ -21,6 +21,7 @@ def main():
     publish.add_argument('--type', required=True)
     publish.add_argument('--data', required=True)
     publish.add_argument('--key', default='')
+    publish.add_argument('--idempotency-key', default='')
     consume = commands.add_parser('consume')
     consume.add_argument('topic')
     consume.add_argument('--group', required=True)
@@ -35,7 +36,7 @@ def main():
     elif args.command == 'topic':
         result = client.request('GET', client.topic_path(args.name))
     elif args.command == 'publish':
-        result = client.publish(args.topic, args.type, json.loads(args.data), args.key)
+        result = client.publish(args.topic, args.type, json.loads(args.data), args.key, idempotency_key=args.idempotency_key)
     else:
         def display(batch):
             for event in batch.events:
