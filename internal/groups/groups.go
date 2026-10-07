@@ -46,9 +46,10 @@ type lease struct {
 	expires       time.Time
 }
 type group struct {
-	state   State
-	members map[string]time.Time
-	pending map[int]lease
+	consumed uint64
+	state    State
+	members  map[string]time.Time
+	pending  map[int]lease
 }
 type Coordinator struct {
 	mu              sync.Mutex
@@ -277,6 +278,9 @@ func (c *Coordinator) Pull(w, t, n, id string, epoch uint64, limit int) ([]Deliv
 		if len(out) >= 8 {
 			break
 		}
+	}
+	for _, delivery := range out {
+		g.consumed += uint64(len(delivery.Events))
 	}
 	return out, nil
 }

@@ -104,3 +104,5 @@ The dashboard, WebSocket group consumers, server-persisted replay jobs, event im
 Future clustering would require persistent broker identity, coordinated partition leadership, follower replication, leader fencing and failover. None of those is simulated here. Redis is intentionally absent because it currently has no authoritative coordination role.
 
 DLQ records support audited admin retry/discard decisions via the public API and both SDKs. Retry republishes to the original topic; discard is logical. Durable outbox recovery and retention pins protect interrupted retry appends. See [API documentation](docs/API.md#dead-letter-decisions) for semantics and backup boundaries.
+
+[Operational metrics](docs/METRICS.md) expose actual broker appends, publish latency, partition bounds, consumer lag/leases/retention loss and durable webhook outcomes. A dedicated `metrics:read` key supports workspace-scoped scraping without administrative mutations.

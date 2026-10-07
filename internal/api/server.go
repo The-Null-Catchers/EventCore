@@ -18,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -45,16 +44,16 @@ type Server struct {
 	Webhooks     *webhooks.Worker
 	WebhookAdmin WebhookAdmin
 
-	Broker              *storage.Broker
-	Groups              *groups.Coordinator
-	Auth                Auth
-	Ready               func(context.Context) error
-	SecureCookies       bool
-	Published, Consumed atomic.Uint64
-	mu                  sync.Mutex
-	limits              map[string]bucket
-	started             time.Time
-	MaxRPS              int
+	Broker          *storage.Broker
+	Groups          *groups.Coordinator
+	Auth            Auth
+	Ready           func(context.Context) error
+	SecureCookies   bool
+	MetadataMetrics MetadataMetrics
+	mu              sync.Mutex
+	limits          map[string]bucket
+	started         time.Time
+	MaxRPS          int
 }
 
 func (s *Server) allow(k string, limit int) bool {
@@ -223,21 +222,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/metrics" && r.Method == "GET" {
-		if !Allowed(p, "*", "admin") {
-			fail(w, 403, errors.New("admin scope required"))
+		if !allowedMetrics(p) {
+			fail(w, 403, errors.New("admin or metrics:read scope required"))
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprintf(w, "# TYPE events_published_total counter\nevents_published_total %d\n# TYPE events_consumed_total counter\nevents_consumed_total %d\n# TYPE broker_uptime_seconds gauge\nbroker_uptime_seconds %.3f\n", s.Published.Load(), s.Consumed.Load(), time.Since(s.started).Seconds())
-		for _, t := range s.Broker.Topics(p.Workspace) {
-			for i := 0; i < t.Partitions; i++ {
-				b, err := s.Broker.Bounds(p.Workspace, t.Name, i)
-				if err != nil {
-					continue
-				}
-				fmt.Fprintf(w, "broker_disk_bytes{workspace=%q,topic=%q,partition=%q} %d\n", p.Workspace, t.Name, strconv.Itoa(i), b.Bytes)
-			}
-		}
+		s.metrics(w, r, p)
 		return
 	}
 	if r.URL.Path == "/v1/keys" && r.Method == "POST" {
@@ -260,7 +249,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, scope := range req.Scopes {
 			parts := strings.Split(scope, ":")
-			if scope != "admin" && (len(parts) != 3 || parts[0] != "topic" || (!storage.ValidName(parts[1]) && parts[1] != "*") || (parts[2] != "produce" && parts[2] != "consume" && parts[2] != "read")) {
+			if scope != "admin" && scope != "metrics:read" && (len(parts) != 3 || parts[0] != "topic" || (!storage.ValidName(parts[1]) && parts[1] != "*") || (parts[2] != "produce" && parts[2] != "consume" && parts[2] != "read")) {
 				fail(w, 400, errors.New("invalid scope"))
 				return
 			}
@@ -527,9 +516,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				}
 				results = append(results, map[string]any{"error": err.Error(), "status": status})
 			} else {
-				if !event.Deduplicated {
-					s.Published.Add(1)
-				}
 				results = append(results, map[string]any{"event": event})
 			}
 		}
@@ -553,9 +539,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 					fail(w, 400, err)
 				}
 				return
-			}
-			if !event.Deduplicated {
-				s.Published.Add(1)
 			}
 			reply(w, 201, event)
 			return
@@ -659,11 +642,7 @@ func (s *Server) group(w http.ResponseWriter, r *http.Request, p metadata.Princi
 		}
 		var deliveries []groups.Delivery
 		deliveries, err = s.Groups.Pull(p.Workspace, topic, name, req.Member, req.Epoch, req.Limit)
-		if err == nil {
-			for _, d := range deliveries {
-				s.Consumed.Add(uint64(len(d.Events)))
-			}
-		}
+
 		result = deliveries
 	case "ack", "nack":
 		err = s.Groups.Ack(p.Workspace, topic, name, req.Member, req.Epoch, req.Partition, req.Token, parts[5] == "nack")

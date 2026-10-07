@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import urllib.request
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from eventcore import EventCore, EventCoreError
 
@@ -35,9 +36,32 @@ def bootstrap():
             return json.load(response)
     auth = call('/v1/auth/login', {'email': os.environ['BOOTSTRAP_EMAIL'],
                                 'password': os.environ['BOOTSTRAP_PASSWORD'], 'workspace': 'demo'})
-    return call('/v1/keys', {'name': 'acceptance', 'scopes': ['admin'],
+    admin = call('/v1/keys', {'name': 'acceptance', 'scopes': ['admin'],
                            'expires_at': (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()},
                 auth['csrf_token'])['token']
+    metrics = call('/v1/keys', {'name': 'acceptance-metrics', 'scopes': ['metrics:read'],
+                              'expires_at': (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()},
+                   auth['csrf_token'])['token']
+    return admin, metrics
+
+
+def scrape(token):
+    for attempt in range(10):
+        try:
+            req = urllib.request.Request(base + '/metrics', headers={'Authorization': 'Bearer ' + token})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                lines = response.read().decode().splitlines()
+            return {line.rsplit(' ', 1)[0]: float(line.rsplit(' ', 1)[1])
+                    for line in lines if line and not line.startswith('#')}
+        except urllib.error.HTTPError as error:
+            if error.code != 429 or attempt == 9:
+                raise
+            time.sleep(1.05)
+
+
+def metric_sum(samples, name):
+    return sum(value for series, value in samples.items()
+               if series == name or series.startswith(name + '{'))
 
 def drain(client, group, member, epoch):
     ids = set()
@@ -55,7 +79,7 @@ def drain(client, group, member, epoch):
     return ids
 
 if phase == 'before':
-    token = bootstrap()
+    token, metrics_token = bootstrap()
     client = TestClient(base, token)
     client.request('POST', '/v1/topics', {'name': 'orders', 'partitions': 4})
     client.request('POST', '/v1/topics/orders/groups', {'name': 'billing', 'start': 'earliest'})
@@ -114,14 +138,32 @@ if phase == 'before':
     client.request('POST', '/v1/topics/orders/groups/billing/leave', {'member': 'consumer-b'})
     final = client.request('GET', '/v1/topics/orders/groups/billing')
     assert sum(final['lag'].values()) == 0
+    samples = scrape(metrics_token)
+    assert samples['events_published_total'] == 10000
+    assert samples['publish_latency_seconds_count'] == 10000
+    assert samples['events_consumed_total'] >= 10000
+    assert metric_sum(samples, 'consumer_lag') == 0
+    assert metric_sum(samples, 'partition_next_offset') == 10000
+    assert samples['active_consumers'] == 0
+    try:
+        TestClient(base, metrics_token).publish('orders', 'blocked', {})
+        raise AssertionError('metrics-only key published an event')
+    except EventCoreError as error:
+        assert error.status == 403
     with open(state_path, 'w') as f:
-        json.dump({'token': token, 'counts': counts, 'ids': sorted(ids)}, f)
+        json.dump({'token': token, 'metrics_token': metrics_token, 'counts': counts, 'ids': sorted(ids)}, f)
     os.chmod(state_path, 0o600)
     print('PASS: 10,000 SDK events, key ordering, valid offsets, two members, rebalance, ACKs, zero lag')
 elif phase == 'after':
     with open(state_path) as f:
         saved = json.load(f)
     client = TestClient(base, saved['token'])
+    samples = scrape(saved['metrics_token'])
+    assert samples['events_published_total'] == 0
+    assert samples['events_consumed_total'] == 0
+    assert metric_sum(samples, 'partition_next_offset') == 10000
+    assert metric_sum(samples, 'consumer_lag') == 0
+
     retry = client.publish('orders', 'order.created', {'sequence': 9999}, 'customer_499',
                            idempotency_key='order-9999')
     assert retry['deduplicated'] and retry['id'] in saved['ids']
@@ -161,6 +203,13 @@ elif phase == 'after':
                           from_time='2000-01-01T00:00:00Z')
     assert all(receipt['event']['deduplicated'] for receipt in retry['receipts'])
     assert client.request('GET', '/v1/topics/archive')['partitions'] == archive_before
+    samples = scrape(saved['metrics_token'])
+    assert samples['events_published_total'] == 10002
+    assert samples['publish_latency_seconds_count'] == 10002
+    assert samples['events_consumed_total'] == 10001
+    assert metric_sum(samples, 'consumer_lag') == 0
+    assert metric_sum(samples, 'partition_retained_events') == 20002
+    print('PASS: workspace metrics, least-privilege scrape key, counters reset, lag and replay append counts')
     print('PASS: timestamp-filtered replay copied all 10,001 events to archive; retried page deduplicated')
     print('PASS: broker restart preserved all events and commits, offsets continued, reset and replay of 10,001 events')
 else:

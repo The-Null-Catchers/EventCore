@@ -44,6 +44,7 @@ func TestPostgresWebhookHistoryAndEncryption(t *testing.T) {
 		db.SQL.ExecContext(ctx, `DELETE FROM webhook_delivery_history WHERE subscription_id=$1`, id)
 		db.SQL.ExecContext(ctx, `DELETE FROM webhook_attempts WHERE subscription_id=$1`, id)
 		db.SQL.ExecContext(ctx, `DELETE FROM webhooks WHERE id=$1`, id)
+		db.SQL.ExecContext(ctx, `DELETE FROM webhook_metrics WHERE workspace_id=$1`, w)
 		db.SQL.ExecContext(ctx, `DELETE FROM workspaces WHERE id=$1`, w)
 	}()
 	subs, err := db.Subscriptions(ctx)
@@ -108,6 +109,14 @@ func TestPostgresWebhookHistoryAndEncryption(t *testing.T) {
 	if err != nil || len(other.Entries) != 0 {
 		t.Fatal("workspace isolation", other, err)
 	}
+	metrics, err := db.WebhookMetrics(ctx, w)
+	if err != nil || metrics.Delivered != 1 || metrics.Failed != 1 || metrics.Unknown != 0 {
+		t.Fatal(metrics, err)
+	}
+	otherMetrics, err := db.WebhookMetrics(ctx, "other")
+	if err != nil || otherMetrics.Delivered != 0 || otherMetrics.Failed != 0 {
+		t.Fatal(otherMetrics, err)
+	}
 	// Legacy latest-only records are backfilled once, without inventing older attempts.
 	legacy, _ := json.Marshal(webhooks.Attempt{Count: 3, Status: "dlq", HTTPStatus: 500})
 	if _, err = db.SQL.ExecContext(ctx, `INSERT INTO webhook_attempts(subscription_id,event_id,attempt) VALUES($1,'legacy',$2)`, id, legacy); err != nil {
@@ -138,11 +147,15 @@ func TestPostgresWebhookHistoryAndEncryption(t *testing.T) {
 		db.SQL.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+fn+` ON webhook_delivery_history`)
 		db.SQL.ExecContext(ctx, `DROP FUNCTION IF EXISTS `+fn+`() `)
 	}()
-	if err = db.SaveAttempt(ctx, id, "rollback", webhooks.Attempt{Count: 1, Status: "sending"}); err == nil {
+	if err = db.SaveAttempt(ctx, id, "rollback", webhooks.Attempt{Count: 1, Status: "delivered"}); err == nil {
 		t.Fatal("failed history accepted")
 	}
 	state, err := db.Attempt(ctx, id, "rollback")
 	if err != nil || state.Count != 0 {
 		t.Fatal("latest state was not rolled back", state, err)
+	}
+	metrics, err = db.WebhookMetrics(ctx, w)
+	if err != nil || metrics.Delivered != 1 || metrics.Failed != 1 {
+		t.Fatal("counter changed on rollback", metrics, err)
 	}
 }

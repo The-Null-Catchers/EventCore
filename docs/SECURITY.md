@@ -21,3 +21,5 @@ Sensitive operations record `attempt.<action>` before mutation, so an audit-stor
 This is a development baseline requiring the hardening gaps in STATUS.md before public multi-tenant exposure. Report issues privately to the repository maintainers; do not include credentials or event payloads in public bug reports.
 
 Delivery history is immutable per attempt transition and commits atomically with the latest delivery state. An interrupted send is recorded as an unknown outcome; operators must assume the receiver may already have processed it. History is workspace-scoped and cursor-bounded but has no lifetime cleanup yet. Legacy latest-only records are backfilled once on upgrade; stop the old broker before applying an upgrade and maintain consistent metadata/log backups.
+
+Monitoring keys can use `metrics:read` without topic or administration permissions. Event/consumer metrics are scoped to the authenticated workspace; filesystem capacity and process uptime describe the shared node. Scrape failures return HTTP503 rather than partial success. Keep monitoring credentials outside source control and isolate the monitoring server.

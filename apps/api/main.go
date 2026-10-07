@@ -99,7 +99,7 @@ func run() error {
 			}
 		}()
 	}
-	server := &api.Server{DeadLetters: dlq, Webhooks: webhookWorker, WebhookAdmin: db, Broker: broker, Groups: coordinator, Auth: db, SecureCookies: secure, Ready: func(ctx context.Context) error {
+	server := &api.Server{MetadataMetrics: db, DeadLetters: dlq, Webhooks: webhookWorker, WebhookAdmin: db, Broker: broker, Groups: coordinator, Auth: db, SecureCookies: secure, Ready: func(ctx context.Context) error {
 		if err := broker.Check(); err != nil {
 			return err
 		}
