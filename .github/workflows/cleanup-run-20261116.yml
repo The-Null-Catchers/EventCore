@@ -1,0 +1,35 @@
+name: One-time audited branch cleanup
+
+on:
+  push:
+    branches: [maintenance/cleanup-run-20261116]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: one-time-audited-branch-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # Needed only for archived, lease-guarded pushes to this repository.
+          persist-credentials: true
+      - name: Archive and delete audited stale branches
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/maintenance/cleanup.py --apply
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: branch-cleanup-result
+          path: cleanup-result.json
+          if-no-files-found: ignore
+          retention-days: 90

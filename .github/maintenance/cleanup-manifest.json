@@ -1,0 +1,41 @@
+{
+  "repository": "The-Null-Catchers/EventCore",
+  "defaultBranch": "main",
+  "baseSHA": "d6bfd0b248afd0583a0c202ddd2700ced9554103",
+  "backupTag": "cleanup-backup-2026-11-16",
+  "delete": [
+    {
+      "name": "feat/bounded-event-replay",
+      "sha": "1a8a2347cd9fef2c5ee679b5bcac65cb578da830",
+      "reason": "equivalent"
+    },
+    {
+      "name": "feat/durable-dlq-actions",
+      "sha": "04f4c1588be87bab1e0de5a6ca7fe6ac5a392acd",
+      "reason": "equivalent"
+    },
+    {
+      "name": "feat/durable-producer-idempotency",
+      "sha": "d79042371884ddd88828302a2aef849be219de1f",
+      "reason": "equivalent"
+    },
+    {
+      "name": "feat/fenced-partial-commits",
+      "sha": "15f03998ee36eecdaa84f52238c0b266100017e7",
+      "reason": "equivalent"
+    },
+    {
+      "name": "feat/operational-delivery-metrics",
+      "sha": "10456fc49913d307c1de4cbcc48ce4a531e23441",
+      "reason": "equivalent"
+    }
+  ],
+  "status": "Explicitly approved: archive before lease-guarded deletion",
+  "archiveParents": [
+    "1a8a2347cd9fef2c5ee679b5bcac65cb578da830",
+    "04f4c1588be87bab1e0de5a6ca7fe6ac5a392acd",
+    "d79042371884ddd88828302a2aef849be219de1f",
+    "15f03998ee36eecdaa84f52238c0b266100017e7",
+    "10456fc49913d307c1de4cbcc48ce4a531e23441"
+  ]
+}
