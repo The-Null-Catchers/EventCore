@@ -3,6 +3,24 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {EventCore,EventCoreError} from '../dist/index.js';
 const client=new EventCore({baseUrl:'https://eventcore.example',apiKey:'test'});
+test('subscription cleanup preserves processing errors and reports standalone failures',async()=>{
+ const original=globalThis.fetch;
+ try{
+  for(const processingFails of [true,false]){
+   const controller=new AbortController(),failure=new Error('processing failed'),cleanup=new Error('leave failed');
+   let calls=0;
+   globalThis.fetch=async(url)=>{
+    if(url.endsWith('/join'))return Response.json({epoch:1});
+    if(url.endsWith('/pull'))return Response.json([{partition:0,token:'lease',epoch:1,events:[]}]);
+    assert.ok(url.endsWith('/leave'));calls++;throw cleanup;
+   };
+   if(!processingFails)controller.abort();
+   await assert.rejects(client.subscribe('orders',{group:'billing',member:'member',signal:controller.signal},async()=>{throw failure}),
+    error=>error===(processingFails?failure:cleanup));
+   assert.equal(calls,1);
+  }
+ }finally{globalThis.fetch=original}
+});
 test('redirects are surfaced without forwarding or replaying requests',async()=>{
  let targetCalls=0,sourceCalls=0;
  const server=createServer((req,res)=>{

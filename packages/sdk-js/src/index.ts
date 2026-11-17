@@ -63,6 +63,7 @@ export class EventCore {
   async subscribe(topic:string,options:{group:string;member:string;signal:AbortSignal},callback:(delivery:Delivery)=>Promise<void>):Promise<void>{
     let epoch=(await this.join(topic,options.group,options.member)).epoch;
     let delay=200;
+    let failed=false;
     try{
       while(!options.signal.aborted){
         let batches:Delivery[];
@@ -76,6 +77,10 @@ export class EventCore {
         for(const batch of batches){if(options.signal.aborted)break;await callback(batch)}
         if(batches.length===0)await sleep(200);
       }
-    }finally{await this.request('POST',`${this.groupPath(topic,options.group)}/leave`,{member:options.member})}
+    }catch(error){failed=true;throw error}
+    finally{
+      try{await this.request('POST',`${this.groupPath(topic,options.group)}/leave`,{member:options.member})}
+      catch(error){if(!failed)throw error}
+    }
   }
 }
