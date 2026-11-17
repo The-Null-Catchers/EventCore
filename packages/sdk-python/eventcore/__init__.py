@@ -1,5 +1,6 @@
 """Synchronous EventCore client. Publication is never retried implicitly."""
 from __future__ import annotations
+import http.client
 import json
 import time
 import urllib.error
@@ -64,7 +65,10 @@ class EventCore:
                 with self._opener.open(request, timeout=self.timeout) as response:
                     return json.load(response)
             except urllib.error.HTTPError as error:
-                payload = error.read(2 << 20)
+                try:
+                    payload = error.read(2 << 20)
+                finally:
+                    error.close()
                 try:
                     details = json.loads(payload)
                     message = details.get('error', str(error))
@@ -75,7 +79,7 @@ class EventCore:
                     time.sleep(0.2 * 2 ** attempt)
                     continue
                 raise EventCoreError(error.code, message, details) from error
-            except (urllib.error.URLError, TimeoutError):
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
                 if attempt + 1 == attempts:
                     raise
                 time.sleep(0.2 * 2 ** attempt)
@@ -153,7 +157,7 @@ class EventCore:
                     else:
                         raise
                     continue
-                except (urllib.error.URLError, TimeoutError):
+                except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 5)
                     # Recover generation and pending leases without pretending ack succeeded.
