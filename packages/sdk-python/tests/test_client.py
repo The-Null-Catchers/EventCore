@@ -1,4 +1,6 @@
 import json
+import http.client
+import io
 import unittest
 from unittest.mock import Mock, patch
 import urllib.error
@@ -7,11 +9,71 @@ from threading import Thread
 from eventcore import EventCore, Delivery, EventCoreError
 
 class ClientTests(unittest.TestCase):
+    def test_get_retries_disconnected_and_truncated_responses(self):
+        for failure in (http.client.RemoteDisconnected('connection closed'),
+                        http.client.IncompleteRead(b'{', 10)):
+            with self.subTest(failure=type(failure).__name__):
+                client = EventCore('https://example.com', 'key')
+                with patch.object(client._opener, 'open', side_effect=[failure, io.BytesIO(b'{}')]) as call, \
+                        patch('eventcore.time.sleep'):
+                    self.assertEqual(client.request('GET', '/v1/topics'), {})
+                    self.assertEqual(call.call_count, 2)
+
+    def test_mutations_never_retry_disconnected_or_truncated_responses(self):
+        for failure in (http.client.RemoteDisconnected('connection closed'),
+                        http.client.IncompleteRead(b'{', 10)):
+            with self.subTest(failure=type(failure).__name__):
+                client = EventCore('https://example.com', 'key')
+                with patch.object(client._opener, 'open', side_effect=failure) as call:
+                    with self.assertRaises(type(failure)):
+                        client.publish('orders', 'created', {})
+                    self.assertEqual(call.call_count, 1)
+
+    def test_http_error_response_is_closed_before_retry_or_raise(self):
+        for status in (400, 503):
+            with self.subTest(status=status):
+                client = EventCore('https://example.com', 'key')
+                body = io.BytesIO(b'{"error":"unavailable"}')
+                error = urllib.error.HTTPError('https://example.com', status, 'failure', {}, body)
+                calls = iter([error, None])
+                def open_response(*args, **kwargs):
+                    value = next(calls)
+                    if value is not None:
+                        raise value
+                    self.assertTrue(body.closed)
+                    return io.BytesIO(b'{}')
+                with patch.object(client._opener, 'open', side_effect=open_response) as call, \
+                        patch('eventcore.time.sleep'):
+                    if status == 400:
+                        with self.assertRaises(EventCoreError):
+                            client.request('GET', '/v1/topics')
+                        self.assertTrue(body.closed)
+                    else:
+                        self.assertEqual(client.request('GET', '/v1/topics'), {})
+                    self.assertEqual(call.call_count, 1 if status == 400 else 2)
+
+    def test_truncated_response_body_is_closed_and_get_retries_are_bounded(self):
+        class TruncatedBody(io.BytesIO):
+            def read(self, *args, **kwargs):
+                raise http.client.IncompleteRead(b'{', 10)
+        for method, attempts in (('GET', 3), ('POST', 1)):
+            with self.subTest(method=method):
+                client = EventCore('https://example.com', 'key')
+                responses = [TruncatedBody() for _ in range(attempts)]
+                with patch.object(client._opener, 'open', side_effect=responses) as call, \
+                        patch('eventcore.time.sleep'):
+                    with self.assertRaises(http.client.IncompleteRead):
+                        client.request(method, '/v1/topics')
+                    self.assertEqual(call.call_count, attempts)
+                    self.assertTrue(all(response.closed for response in responses))
+
     def test_subscription_still_recovers_pull_transport_failures(self):
         for error, joins in ((EventCoreError(409, 'stale epoch'), 2),
                              (EventCoreError(503, 'unavailable'), 1),
                              (urllib.error.URLError('offline'), 2),
-                             (TimeoutError('pull timeout'), 2)):
+                             (TimeoutError('pull timeout'), 2),
+                             (http.client.RemoteDisconnected('connection closed'), 2),
+                             (http.client.IncompleteRead(b'{', 10), 2)):
             with self.subTest(error=error):
                 client = EventCore('https://example.com', 'key')
                 stopped = False
@@ -30,7 +92,9 @@ class ClientTests(unittest.TestCase):
 
     def test_subscription_callback_errors_are_not_retried_or_swallowed(self):
         for error in (EventCoreError(409, 'processing conflict'), EventCoreError(503, 'dependency down'),
-                      urllib.error.URLError('callback network error'), TimeoutError('callback timeout')):
+                      urllib.error.URLError('callback network error'), TimeoutError('callback timeout'),
+                      http.client.RemoteDisconnected('callback disconnected'),
+                      http.client.IncompleteRead(b'{', 10)):
             with self.subTest(error=error):
                 client = EventCore('https://example.com', 'key')
                 callback = Mock(side_effect=error)
