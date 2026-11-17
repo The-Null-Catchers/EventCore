@@ -2,6 +2,8 @@
 
 Base URL in local Compose: `http://localhost:8080`. JSON envelopes use server-assigned ID/topic/partition/offset/UTC timestamp and producer type/key/headers/data and optional idempotency_key. Server version: `0.1.0-dev`. Topic and group names must pass the constrained name rule in STORAGE.md. Partition offsets and committed offsets are signed 64-bit nonnegative integers; SDKs use JSON numbers, so JavaScript offsets above `Number.MAX_SAFE_INTEGER` are not supported yet.
 
+Configure both SDKs with the final API URL. HTTP redirects are rejected with `EventCoreError` carrying the 3xx status; neither client follows or retries them. This keeps API credentials at the configured endpoint and prevents redirect-driven request replays or method changes. Safe GET retries for transient failures remain unchanged.
+
 All routes except health/readiness/login require `Authorization: Bearer <api-key>` or the `eventcore_session` cookie. Cookie mutations also require `X-CSRF-Token`. Permissions are workspace-bound. Role owner/admin permits all operations, developer permits produce/consume/read, viewer permits read. API keys explicitly grant `topic:<name>:produce|consume|read`, wildcard topic equivalents, or `admin`.
 
 | Method and path | Body / query | Response | Permission |

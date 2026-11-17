@@ -2,12 +2,65 @@ import json
 import unittest
 from unittest.mock import patch
 import urllib.error
-from eventcore import EventCore, Delivery
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+from eventcore import EventCore, Delivery, EventCoreError
 
 class ClientTests(unittest.TestCase):
+    def test_redirects_never_forward_credentials_or_replay_requests(self):
+        received = []
+        source_calls = []
+
+        class Target(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append((self.command, self.headers.get('Authorization')))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{}')
+            do_POST = do_GET
+            def log_message(self, *args):
+                pass
+
+        target = ThreadingHTTPServer(('127.0.0.1', 0), Target)
+
+        class Redirect(BaseHTTPRequestHandler):
+            def do_GET(self):
+                source_calls.append(self.command)
+                self.send_response(int(self.path.rsplit('/', 1)[-1]))
+                self.send_header('Location', f'http://127.0.0.1:{target.server_port}/target')
+                self.end_headers()
+            do_POST = do_GET
+            def log_message(self, *args):
+                pass
+
+        source = ThreadingHTTPServer(('127.0.0.1', 0), Redirect)
+        threads = [Thread(target=server.serve_forever, daemon=True) for server in (source, target)]
+        for thread in threads:
+            thread.start()
+        try:
+            client = EventCore(f'http://127.0.0.1:{source.server_port}', 'private-api-key')
+            for method in ('GET', 'POST'):
+                for status in (301, 302, 303, 307, 308):
+                    with self.subTest(method=method, status=status):
+                        with self.assertRaises(EventCoreError) as raised:
+                            client.request(method, f'/redirect/{status}', {} if method == 'POST' else None)
+                        self.assertEqual(raised.exception.status, status)
+            self.assertEqual(received, [])
+            self.assertEqual(len(source_calls), 10)
+            direct = EventCore(f'http://127.0.0.1:{target.server_port}', 'private-api-key')
+            self.assertEqual(direct.request('GET', '/target'), {})
+            self.assertEqual(direct.request('POST', '/target', {}), {})
+            self.assertEqual(received, [('GET', 'Bearer private-api-key'), ('POST', 'Bearer private-api-key')])
+        finally:
+            for server in (source, target):
+                server.shutdown()
+                server.server_close()
+            for thread in threads:
+                thread.join()
+
     def test_publish_does_not_retry(self):
         client = EventCore('https://example.com', 'key')
-        with patch('urllib.request.urlopen', side_effect=urllib.error.URLError('ambiguous')) as call:
+        with patch.object(client._opener, 'open', side_effect=urllib.error.URLError('ambiguous')) as call:
             with self.assertRaises(urllib.error.URLError):
                 client.publish('orders', 'created', {})
             self.assertEqual(call.call_count, 1)
@@ -25,7 +78,7 @@ class ClientTests(unittest.TestCase):
         client = EventCore('https://example.com', 'key')
         delivery = Delivery(client, 'orders', 'billing', 'a',
                             {'partition': 0, 'epoch': 4, 'token': 'lease', 'events': []})
-        with patch('urllib.request.urlopen', side_effect=urllib.error.URLError('ambiguous')) as call:
+        with patch.object(client._opener, 'open', side_effect=urllib.error.URLError('ambiguous')) as call:
             with self.assertRaises(urllib.error.URLError):
                 delivery.commit(3)
             self.assertEqual(call.call_count, 1)
@@ -59,7 +112,7 @@ class ClientTests(unittest.TestCase):
         client = EventCore('https://example.com', 'key')
         error = urllib.error.HTTPError('https://example.com', 503, 'failure', {},
                     io.BytesIO(b'{"error":"disk pressure","next_offset":6,"receipts":[],"done":false}'))
-        with patch('urllib.request.urlopen', side_effect=error) as call:
+        with patch.object(client._opener, 'open', side_effect=error) as call:
             with self.assertRaises(EventCoreError) as raised:
                 client.replay('orders', 'archive', 'run', 0, 5, 20)
             self.assertEqual(raised.exception.details['next_offset'], 6)
@@ -67,7 +120,7 @@ class ClientTests(unittest.TestCase):
 
     def test_dead_letter_mutation_is_not_retried(self):
         client = EventCore('https://example.com', 'key')
-        with patch('urllib.request.urlopen', side_effect=OSError('connection lost')) as call:
+        with patch.object(client._opener, 'open', side_effect=OSError('connection lost')) as call:
             with self.assertRaises(OSError):
                 client.resolve_dead_letter('orders.DLQ', 0, 9, 'retry')
             self.assertEqual(call.call_count, 1)

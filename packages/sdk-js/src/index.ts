@@ -19,7 +19,9 @@ export class EventCore {
     const attempts=method==='GET'?3:1;
     for(let attempt=0;attempt<attempts;attempt++){
       try{
-        const response=await fetch(this.baseUrl+path,{method,headers:{Authorization:`Bearer ${this.options.apiKey}`,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(this.options.timeoutMs??10000)});
+        const response=await fetch(this.baseUrl+path,{method,redirect:'manual',headers:{Authorization:`Bearer ${this.options.apiKey}`,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(this.options.timeoutMs??10000)});
+        // Reject redirects before parsing a possibly empty/HTML response body.
+        if(response.status>=300&&response.status<400)throw new EventCoreError(response.status,'HTTP redirect refused');
         const data=await response.json();
         if(!response.ok)throw new EventCoreError(response.status,data.error??`HTTP ${response.status}`,data);
         return data as T;
