@@ -8,6 +8,11 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward API credentials or replay mutations at a redirect target.
+        return None
+
 class EventCoreError(Exception):
     def __init__(self, status: int, message: str, details: dict | None = None):
         super().__init__(message)
@@ -46,6 +51,7 @@ class EventCore:
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.timeout = timeout
+        self._opener = urllib.request.build_opener(_NoRedirect())
 
     def request(self, method: str, path: str, body: Any = None) -> Any:
         raw = None if body is None else json.dumps(body, separators=(',', ':')).encode()
@@ -55,7 +61,7 @@ class EventCore:
         attempts = 3 if method == 'GET' else 1
         for attempt in range(attempts):
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                with self._opener.open(request, timeout=self.timeout) as response:
                     return json.load(response)
             except urllib.error.HTTPError as error:
                 payload = error.read(2 << 20)
