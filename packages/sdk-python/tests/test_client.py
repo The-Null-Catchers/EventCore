@@ -1,12 +1,68 @@
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from eventcore import EventCore, Delivery, EventCoreError
 
 class ClientTests(unittest.TestCase):
+    def test_subscription_still_recovers_pull_transport_failures(self):
+        for error, joins in ((EventCoreError(409, 'stale epoch'), 2),
+                             (EventCoreError(503, 'unavailable'), 1),
+                             (urllib.error.URLError('offline'), 2),
+                             (TimeoutError('pull timeout'), 2)):
+            with self.subTest(error=error):
+                client = EventCore('https://example.com', 'key')
+                stopped = False
+                delivery = object()
+                def callback(item):
+                    nonlocal stopped
+                    self.assertIs(item, delivery)
+                    stopped = True
+                with patch.object(client, 'join', return_value={'epoch': 1}) as join, \
+                     patch.object(client, 'pull', side_effect=[error, [delivery]]) as pull, \
+                     patch.object(client, 'request') as leave, patch('time.sleep'):
+                    client.subscribe('orders', 'billing', 'member', callback, stop=lambda: stopped)
+                    self.assertEqual(pull.call_count, 2)
+                    self.assertEqual(join.call_count, joins)
+                    leave.assert_called_once_with('POST', '/v1/topics/orders/groups/billing/leave', {'member': 'member'})
+
+    def test_subscription_callback_errors_are_not_retried_or_swallowed(self):
+        for error in (EventCoreError(409, 'processing conflict'), EventCoreError(503, 'dependency down'),
+                      urllib.error.URLError('callback network error'), TimeoutError('callback timeout')):
+            with self.subTest(error=error):
+                client = EventCore('https://example.com', 'key')
+                callback = Mock(side_effect=error)
+                with patch.object(client, 'join', return_value={'epoch': 1}) as join, \
+                     patch.object(client, 'pull', return_value=[object()]) as pull, \
+                     patch.object(client, 'request') as leave, patch('time.sleep'):
+                    with self.assertRaises(type(error)) as raised:
+                        client.subscribe('orders', 'billing', 'member', callback,
+                                         stop=Mock(side_effect=[False, True]))
+                    self.assertIs(raised.exception, error)
+                    self.assertEqual(callback.call_count, 1)
+                    self.assertEqual(pull.call_count, 1)
+                    self.assertEqual(join.call_count, 1)
+                    leave.assert_called_once_with('POST', '/v1/topics/orders/groups/billing/leave', {'member': 'member'})
+
+    def test_subscription_cleanup_does_not_replace_processing_failure(self):
+        client = EventCore('https://example.com', 'key')
+        failure = RuntimeError('processing failed')
+        with patch.object(client, 'join', return_value={'epoch': 1}), \
+             patch.object(client, 'pull', return_value=[object()]), \
+             patch.object(client, 'request', side_effect=OSError('leave failed')):
+            with self.assertRaises(RuntimeError) as raised:
+                client.subscribe('orders', 'billing', 'member', Mock(side_effect=failure))
+            self.assertIs(raised.exception, failure)
+
+    def test_subscription_cleanup_failure_is_reported_after_normal_stop(self):
+        client = EventCore('https://example.com', 'key')
+        with patch.object(client, 'join', return_value={'epoch': 1}), \
+             patch.object(client, 'request', side_effect=OSError('leave failed')):
+            with self.assertRaises(OSError):
+                client.subscribe('orders', 'billing', 'member', Mock(), stop=lambda: True)
+
     def test_redirects_never_forward_credentials_or_replay_requests(self):
         received = []
         source_calls = []

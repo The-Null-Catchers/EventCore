@@ -137,16 +137,13 @@ class EventCore:
         """Callback explicitly acknowledges whole batches after successful processing."""
         epoch = self.join(topic, group, member)['epoch']
         path = self.group_path(topic, group)
+        failed = False
         try:
             backoff = 0.2
             while not stop():
                 try:
                     batches = self.pull(topic, group, member, epoch)
                     backoff = 0.2
-                    for delivery in batches:
-                        callback(delivery)
-                    if not batches:
-                        time.sleep(0.2)
                 except EventCoreError as error:
                     if error.status == 409:
                         epoch = self.join(topic, group, member)['epoch']
@@ -155,10 +152,24 @@ class EventCore:
                         backoff = min(backoff * 2, 5)
                     else:
                         raise
+                    continue
                 except (urllib.error.URLError, TimeoutError):
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 5)
                     # Recover generation and pending leases without pretending ack succeeded.
                     epoch = self.join(topic, group, member)['epoch']
+                    continue
+                # Processing failures belong to the caller, not transport recovery.
+                for delivery in batches:
+                    callback(delivery)
+                if not batches:
+                    time.sleep(0.2)
+        except BaseException:
+            failed = True
+            raise
         finally:
-            self.request('POST', path + '/leave', {'member': member})
+            try:
+                self.request('POST', path + '/leave', {'member': member})
+            except Exception:
+                if not failed:
+                    raise
