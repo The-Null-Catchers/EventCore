@@ -7,7 +7,7 @@ import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
-from eventcore import EventCore, EventCoreError
+from eventcore import Delivery, EventCore, EventCoreError
 
 class TestClient(EventCore):
     def request(self, method, path, body=None):
@@ -23,6 +23,9 @@ class TestClient(EventCore):
 base = os.getenv('EVENTCORE_URL', 'http://localhost:8080')
 phase = sys.argv[1]
 state_path = '.acceptance.json'
+recovery_topic = 'restart-demo'
+recovery_group = 'checkpoint'
+recovery_member = 'worker'
 
 def bootstrap():
     jar = http.cookiejar.CookieJar()
@@ -77,6 +80,55 @@ def drain(client, group, member, epoch):
                 ids.add(event['id'])
             batch.ack()
     return ids
+
+
+def leave_partial_work(client):
+    client.request('POST', '/v1/topics', {'name': recovery_topic, 'partitions': 1})
+    path = client.group_path(recovery_topic, recovery_group)
+    client.request('POST', client.topic_path(recovery_topic) + '/groups',
+                   {'name': recovery_group, 'start': 'earliest'})
+    events = [
+        client.publish(recovery_topic, 'order.created', {'sequence': sequence})
+        for sequence in range(5)
+    ]
+    epoch = client.join(recovery_topic, recovery_group, recovery_member)['epoch']
+    batch, = client.pull(recovery_topic, recovery_group, recovery_member, epoch, 5)
+    assert [event['id'] for event in batch.events] == [event['id'] for event in events]
+    batch.commit(2)
+    abandoned, = client.pull(recovery_topic, recovery_group, recovery_member, epoch, 5)
+    assert [event['offset'] for event in abandoned.events] == [2, 3, 4]
+    state = client.request('GET', path)
+    assert state['offsets'] == {'0': 2} and state['lag'] == {'0': 3}
+    return abandoned.batch
+
+
+def verify_partial_recovery(client, abandoned):
+    path = client.group_path(recovery_topic, recovery_group)
+    state = client.request('GET', path)
+    assert state['members'] == []
+    assert state['offsets'] == {'0': 2} and state['lag'] == {'0': 3}
+
+    # Reuse the logical worker ID in a fresh session and try its pre-restart commit.
+    epoch = client.join(recovery_topic, recovery_group, recovery_member)['epoch']
+    batch, = client.pull(recovery_topic, recovery_group, recovery_member, epoch, 5)
+    assert [event['offset'] for event in batch.events] == [2, 3, 4]
+    assert [event['id'] for event in batch.events] == [
+        event['id'] for event in abandoned['events']
+    ]
+    try:
+        Delivery(client, recovery_topic, recovery_group, recovery_member, abandoned).commit(5)
+        raise AssertionError('pre-restart delivery remained usable')
+    except EventCoreError as error:
+        assert error.status == 409
+
+    state = client.request('GET', path)
+    assert state['offsets'] == {'0': 2} and state['lag'] == {'0': 3}
+    batch.ack()
+    state = client.request('GET', path)
+    assert state['offsets'] == {'0': 5} and state['lag'] == {'0': 0}
+    assert not client.pull(recovery_topic, recovery_group, recovery_member, epoch, 5)
+    print('PASS: restart preserved a two-event checkpoint, redelivered the remaining three, and fenced the old delivery')
+
 
 if phase == 'before':
     token, metrics_token = bootstrap()
@@ -150,8 +202,10 @@ if phase == 'before':
         raise AssertionError('metrics-only key published an event')
     except EventCoreError as error:
         assert error.status == 403
+    abandoned = leave_partial_work(client)
     with open(state_path, 'w') as f:
-        json.dump({'token': token, 'metrics_token': metrics_token, 'counts': counts, 'ids': sorted(ids)}, f)
+        json.dump({'token': token, 'metrics_token': metrics_token, 'counts': counts,
+                   'ids': sorted(ids), 'abandoned': abandoned}, f)
     os.chmod(state_path, 0o600)
     print('PASS: 10,000 SDK events, key ordering, valid offsets, two members, rebalance, ACKs, zero lag')
 elif phase == 'after':
@@ -161,8 +215,8 @@ elif phase == 'after':
     samples = scrape(saved['metrics_token'])
     assert samples['events_published_total'] == 0
     assert samples['events_consumed_total'] == 0
-    assert metric_sum(samples, 'partition_next_offset') == 10000
-    assert metric_sum(samples, 'consumer_lag') == 0
+    assert metric_sum(samples, 'partition_next_offset') == 10005
+    assert metric_sum(samples, 'consumer_lag') == 3
 
     retry = client.publish('orders', 'order.created', {'sequence': 9999}, 'customer_499',
                            idempotency_key='order-9999')
@@ -207,10 +261,11 @@ elif phase == 'after':
     assert samples['events_published_total'] == 10002
     assert samples['publish_latency_seconds_count'] == 10002
     assert samples['events_consumed_total'] == 10001
-    assert metric_sum(samples, 'consumer_lag') == 0
-    assert metric_sum(samples, 'partition_retained_events') == 20002
+    assert metric_sum(samples, 'consumer_lag') == 3
+    assert metric_sum(samples, 'partition_retained_events') == 20007
     print('PASS: workspace metrics, least-privilege scrape key, counters reset, lag and replay append counts')
     print('PASS: timestamp-filtered replay copied all 10,001 events to archive; retried page deduplicated')
     print('PASS: broker restart preserved all events and commits, offsets continued, reset and replay of 10,001 events')
+    verify_partial_recovery(client, saved['abandoned'])
 else:
     raise SystemExit('expected before or after')

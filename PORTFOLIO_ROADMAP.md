@@ -24,8 +24,8 @@ This roadmap applies to this repository and follows the shared Null Catchers por
 
 The [status record](docs/STATUS.md) covers partial commits and stale generation rejection. The [API documentation](docs/API.md) lists the available contracts.
 
-1. [ ] Create a topic, one consumer group, and a fixture of five events using the current API.
-2. [ ] Commit the first two events and restart the consumer and broker. Verify redelivery of the remaining three, rejection of an old-generation commit, and matching offsets.
+1. [x] Create a topic, one consumer group, and a synthetic five-event fixture using the current API.
+2. [x] Commit the first two events and restart the broker. Rejoin through a fresh SDK process, verify redelivery of the remaining three, reject the pre-restart commit, and verify the offsets and lag. The [acceptance script](scripts/acceptance.py) runs in two phases around the broker restart in [CI](.github/workflows/ci.yml).
 3. [ ] Attach the output and commit SHA to a release. State the single-node and at-least-once delivery limits.
 
 ## Portfolio acceptance checklist
