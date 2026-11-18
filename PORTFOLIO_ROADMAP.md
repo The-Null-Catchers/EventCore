@@ -1,44 +1,52 @@
-# EventCore — خطة البورتفيليو
+# EventCore portfolio roadmap
 
-مرجع التقييم الأساسي: 17 نوفمبر 2026. تحديث نشر الخطة داخل المستودع: 18 نوفمبر 2026.
+Baseline reviewed on November 17, 2026. Repository roadmap published on November 18, 2026.
 
-الخطة خاصة بهذا المستودع، ومستخلصة من خطة Null Catchers المشتركة. وصف «الموجود الموثق» يعكس المراجعة بتاريخها؛ تحقّق من الكود ووثائق الحالة الحالية قبل إنشاء مهمة جديدة. لا تعِد تنفيذ ميزة موجودة، ولا تعتبر وجود تعريف CI دليلًا على نجاح تشغيله.
+This roadmap applies to this repository and follows the shared Null Catchers portfolio plan. Verify the documented state against the current code and runs before starting work.
 
-**تقدير شريحة العرض الأولى:** 45–75 ساعة. التقدير تخطيطي لمطور يعرف المشروع، ويستثني انتظار حسابات المتاجر والمراجعات الخارجية وتجهيز بيئة الهدف. لا يغطي جميع بنود P2.
+**Estimated initial demo effort** 45–75 hours for a developer familiar with the project. The estimate excludes external reviews, store accounts, target environment setup, and later milestones.
 
-## الأولويات الخاصة بالمشروع
+## Project priorities
 
-**الموجود الموثق:** event log على القرص مع CRC/fsync، consumer fencing وpartial commits وDLQ/replay، SDKs واختبار قبول مع restart. وثيقة STATUS تضع dashboard وOpenAPI وعمليات الإدارة ضمن المتبقي؛ المشروع single-node ولا يوفر replication.
+**Documented state** The disk event log uses CRC and fsync. The broker supports consumer fencing, partial commits, dead-letter queues, and replay. SDK acceptance includes restart. The broker is single-node, and the dashboard, OpenAPI, and administration remain roadmap items.
 
-**P0 — نسخة العرض:** ابنِ console صغيرة تقرأ APIs الحقيقية: topics/partitions، نشر event، قراءة نطاق، group lag وwebhook attempts/DLQ. أضف حالات expired offset وstale lease بصياغة مفهومة؛ لا تبدأ dashboard شاملًا قبل اختبار المسار الواحد. وثّق OpenAPI للمسارات المعروضة أولًا.
+**P0 — Demo** Demonstrate publishing and partial commits in a small client or console built on the existing API. Document the paths used for topics, partitions, reads, lag, and failed webhook delivery. Make expired offsets and stale leases understandable.
 
-**P1 — قصة المتانة:** سجل نشر مجموعة أحداث، بدء مستهلكين، partial commit، إيقاف consumer ثم broker وإعادة تشغيلهما، ثم إعادة تسليم suffix غير المعتمد. أضف load بإبطاء consumer وامتلاء مساحة الاختبار، مع قياس throughput/latency وشرح حدود at-least-once.
+**P1 — Validation and depth** Run two consumers, commit part of a batch, restart a consumer and the broker, and verify redelivery. Measure throughput and latency with a slow consumer and a full test disk, and document at-least-once limits.
 
-**P2 — لاحقًا:** lifecycle للموضوعات والأعضاء وreset email، ثم async SDK/consumer transports حسب حاجة فعلية. clustering ليس شرطًا لإصدار v0.1.
+**P2 — Later** Add topic and member administration, password reset, and async SDK transports as demand warrants. Clustering is outside v0.1.
 
-**معيار الإنجاز:** offset/lag المعروضان يطابقان broker، restart لا يفقد حدثًا تم ack لقبوله وفق ضمان التخزين، وحدث غير committed يعاد وفق السلوك المعلن؛ لا ادعاء exactly-once أو HA.
+**Acceptance criteria** Displayed offsets and lag match the broker. Acknowledged events survive restart according to the storage guarantees, and uncommitted events can be redelivered.
 
-**الديمو:** publish → consumer → توقف → redelivery → DLQ → retry → replay إلى topic ثانٍ. **الأدلة:** [STATUS](https://github.com/The-Null-Catchers/EventCore/blob/main/docs/STATUS.md)، [PR #9](https://github.com/The-Null-Catchers/EventCore/pull/9).
+**Demo scenario** Publish → consume → stop → redeliver → dead-letter queue → retry → replay to another topic. [STATUS](https://github.com/The-Null-Catchers/EventCore/blob/main/docs/STATUS.md), [PR #9](https://github.com/The-Null-Catchers/EventCore/pull/9).
 
-## بوابة قبول نسخة البورتفيليو
+## Next milestones
 
-- [ ] يستطيع شخص آخر تشغيل المسار الرئيسي من checkout نظيف، باتباع README، دون أسرار شخصية.
-- [ ] توجد قصة واحدة مكتملة: مستخدم محدد، مشكلة محددة، ومسار بداية إلى نتيجة محفوظة.
-- [ ] ينجح اختبار للمسار الرئيسي وحالة فشل مهمة، وتُختبر حدود الصلاحيات حيث توجد حسابات متعددة.
-- [ ] توجد بيانات عرض اصطناعية معلنة، قابلة لإعادة الإنشاء؛ ولا توجد بيانات عملاء أو أسرار في اللقطات.
-- [ ] توجد 4–6 لقطات حقيقية أو العدد الملائم للأداة، وفيديو 60–120 ثانية، وروابط تعمل. تُلتقط الأدلة من إصدار معروف.
-- [ ] README يوضح المزايا الفعلية، طريقة التشغيل، الرسم المعماري، القيود، وروابط الاختبارات والديمو.
-- [ ] Case study قصيرة تشرح قرارين هندسيين، بديلًا جرى استبعاده ولماذا، وفشلًا حقيقيًا وكيف يعالجه النظام.
-- [ ] صفحة Release تسجل SHA وCI والمتطلبات والقيود. لا تُنشر أرقام أداء دون workload وعتاد وطريقة قياس.
-- [ ] حُسمت سياسة الترخيص ونسب المساهمات قبل التوزيع؛ لا نختار ترخيصًا تلقائيًا لجميع المستودعات.
+The [status record](docs/STATUS.md) covers partial commits and stale generation rejection. The [API documentation](docs/API.md) lists the available contracts.
 
-الديمو المستضاف مفيد وليس شرطًا لكل أداة. أدوات تنفيذ الكود وإدارة الخوادم والأسرار يمكن عرضها بفيديو وبيئة معزولة وتجربة محلية قابلة للإعادة. لا تفتح تنفيذًا عامًا غير محدود لمجرد وجود رابط بورتفيليو.
+1. [ ] Create a topic, one consumer group, and a fixture of five events using the current API.
+2. [ ] Commit the first two events and restart the consumer and broker. Verify redelivery of the remaining three, rejection of an old-generation commit, and matching offsets.
+3. [ ] Attach the output and commit SHA to a release. State the single-node and at-least-once delivery limits.
 
-## التنفيذ والمتابعة
+## Portfolio acceptance checklist
 
-- حوّل P0 إلى مهام صغيرة، لكل منها سلوك متوقع ومعيار قبول واختبار مناسب.
-- ابدأ بتأكيد الموجود؛ عدّل هذه الخطة عندما يغلق بند بدليل مرتبط بcommit أو PR.
-- سجّل مصدر بيانات الديمو، والـSHA الذي التُقطت منه الأدلة، وحدود التجربة الفعلية.
-- راجع الفرق النهائي وانتظر نجاح الفحوص المطلوبة لنفس SHA قبل الدمج، مع احترام حماية الفرع.
-- إذا كان التعديل وثائق فقط ولا يوجد فحص ينطبق عليه، سجّل التحقق من محتواها وروابطها؛ لا تسجل اختبارات تشغيل لم تُنفّذ.
-- لا تُنشر أرقام أداء أو ادعاءات أمان أو جاهزية إنتاج بلا دليل مناسب.
+- [ ] Another person can reproduce the primary workflow from a clean checkout using the README and test credentials or fixtures.
+- [ ] The demo tells one complete story with a defined user, problem, and saved result.
+- [ ] Tests cover the main flow, an important failure, and access boundaries when multiple accounts are involved.
+- [ ] Demo data is labeled synthetic and reproducible. Review screenshots and recordings for secrets and customer data.
+- [ ] Include four to six real screenshots where appropriate, a 60–120 second recording, and working links. Identify the revision used for capture.
+- [ ] The README describes implemented capabilities, setup, architecture, limits, tests, and the demo.
+- [ ] A short case study explains two engineering decisions, a considered alternative, and how the system handles an actual failure.
+- [ ] Release evidence records the commit SHA, CI, prerequisites, and limits. Performance data includes workload, hardware, and method.
+- [ ] Licensing and contributor attribution are settled before distribution. Choose the license for each repository individually.
+
+A hosted demo is optional. Code execution, server administration, and secret management can be demonstrated through a recording and a reproducible isolated environment. Keep public demo access scoped to the activities it needs.
+
+## Implementation and follow-up
+
+- Break P0 into tasks with expected behavior, acceptance criteria, and a suitable test.
+- Verify existing functionality first. Update this plan when evidence tied to a commit or PR closes a milestone.
+- Record the fixture source, the revision used for evidence, and the tested limits.
+- Review the final diff and verify required checks for its exact SHA before merging. Follow branch protection.
+- For documentation-only changes with no applicable workflow, verify content and links and record the checks actually performed.
+- Tie performance, security, and readiness claims to supporting evidence.
