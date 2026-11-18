@@ -106,3 +106,7 @@ Future clustering would require persistent broker identity, coordinated partitio
 DLQ records support audited admin retry/discard decisions via the public API and both SDKs. Retry republishes to the original topic; discard is logical. Durable outbox recovery and retention pins protect interrupted retry appends. See [API documentation](docs/API.md#dead-letter-decisions) for semantics and backup boundaries.
 
 [Operational metrics](docs/METRICS.md) expose actual broker appends, publish latency, partition bounds, consumer lag/leases/retention loss and durable webhook outcomes. A dedicated `metrics:read` key supports workspace-scoped scraping without administrative mutations.
+
+## Portfolio roadmap
+
+See the [repository-specific portfolio roadmap](PORTFOLIO_ROADMAP.md) for priorities, acceptance criteria, demo scope, and release evidence. This complements the existing implementation and status documentation.
