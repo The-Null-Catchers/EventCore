@@ -66,11 +66,35 @@ jobs:
           set -a
           source .env
           set +a
-          PYTHONPATH=packages/sdk-python python scripts/acceptance.py before
+          set -o pipefail
+          PYTHONPATH=packages/sdk-python python scripts/acceptance.py before | tee acceptance-before.txt
       - name: Restart the broker with persistent volumes
         run: docker compose restart api && docker compose up -d --wait --wait-timeout 90
       - name: Verify recovery and replay
-        run: PYTHONPATH=packages/sdk-python python scripts/acceptance.py after
+        run: |
+          set -o pipefail
+          PYTHONPATH=packages/sdk-python python scripts/acceptance.py after | tee acceptance-after.txt
+      - name: Record broker restart evidence
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          {
+            echo "Checkout SHA: $(git rev-parse HEAD)"
+            echo "Source SHA: ${SOURCE_SHA}"
+            echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "Run attempt: ${GITHUB_RUN_ATTEMPT}"
+            docker --version
+            docker compose version
+            echo "Scope: single-node broker, at-least-once delivery"
+          } > acceptance-metadata.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: broker-restart-evidence
+          path: |
+            acceptance-before.txt
+            acceptance-after.txt
+            acceptance-metadata.txt
+          if-no-files-found: error
       - if: failure()
         run: docker compose logs --no-color --tail=100 api postgres
       - if: always()
