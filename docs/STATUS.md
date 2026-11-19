@@ -34,6 +34,8 @@ The local environment does not provide Docker or PostgreSQL. Local unit/integrat
 
 [CI run 37240421722](https://github.com/The-Null-Catchers/EventCore/actions/runs/37240421722) passed all three jobs on 2026-10-04 UTC at commit `9058364`: backend race/vet tests against PostgreSQL, JS/Python SDK tests and dependency audit, and Docker Compose acceptance with 10,000 initial events plus restart/reset/replay of 10,001. The earlier service-health quoting failure was fixed before this passing run. Subsequent hardening commits must pass their own CI before these results can be attributed to their exact SHA.
 
+The acceptance job uploads `broker-restart-evidence` after both phases pass. It contains the acceptance output, checkout and source SHAs, run details, and Docker versions. For a release, use the passing push run whose checkout SHA matches the tag and attach that run's evidence. It covers one broker and at-least-once delivery.
+
 ## Required before tagging v0.1.0
 
 1. Complete and test a professional dashboard against these real APIs. No dashboard screenshots exist yet.
