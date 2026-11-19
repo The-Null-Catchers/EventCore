@@ -163,6 +163,10 @@ if phase == 'before':
         raise AssertionError('conflicting key reused')
     except EventCoreError as error:
         assert error.status == 409
+    # Rejected idempotency-key reuse must not append or advance any partition.
+    unchanged = client.request('GET', '/v1/topics/orders')
+    assert [partition['next_offset'] for partition in unchanged['partitions']] == counts
+    assert sum(partition['next_offset'] for partition in unchanged['partitions']) == 10000
     client.join('orders', 'billing', 'consumer-a')
     both = client.join('orders', 'billing', 'consumer-b')
     assert sum(both['lag'].values()) == 10000
