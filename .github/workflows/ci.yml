@@ -86,6 +86,10 @@ jobs:
             docker --version
             docker compose version
             echo "Scope: single-node broker, at-least-once delivery"
+            echo "Acceptance phase: broker restart and SDK replay"
+            echo "Source repository: ${GITHUB_REPOSITORY}"
+            echo "Workflow ref: ${GITHUB_REF}"
+            echo "Evidence status: acceptance evidence, not a published release"
           } > acceptance-metadata.txt
       - uses: actions/upload-artifact@v4
         with:
